@@ -1,0 +1,17 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  bot:
+    build: .
+    container_name: wb-bot
+    env_file: .env
+    volumes:
+      - .:/app  
+    depends_on:
+      - redis
+    restart: always
