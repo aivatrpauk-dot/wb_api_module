@@ -19,32 +19,9 @@ PAID_STORAGE_STATUS_CHECK_INTERVAL = 5  # сек
 PAID_STORAGE_MAX_WAIT_TIME = 300  # 5 минут
 
 
-async def get_supplier_name(api_key: str) -> str:
-    """
-    Получает название магазина из Wildberries API через /api/v1/seller-info.
-    Использует tradeMark, если доступен, иначе name.
-    """
-    url = "https://common-api.wildberries.ru/api/v1/seller-info"
-    headers = {"Authorization": api_key}
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    seller_info = data.get("data", {})
-                    logger.info(f"Полученные данные продавца: {data}")
-                    trade_mark = seller_info.get("tradeMark")
-                    legal_name = data.get("name", "")
-
-                    return legal_name.strip()
-                else:
-                    logger.warning(
-                        f"Не удалось получить seller-info: статус {resp.status}")
-                    return "Магазин"
-        except Exception as e:
-            logger.error(f"Ошибка при получении названия магазина: {e}")
-            return "Магазин"
+# ========================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ========================================
 
 def _is_within_date_range(record: dict, start_dt: datetime, end_dt: datetime) -> bool:
     """Проверяет, находится ли lastChangeDate записи в заданном диапазоне."""
@@ -95,7 +72,59 @@ async def _fetch_with_simple_retry(
     raise RuntimeError("Недостижимо")
 
 
+# ========================================
+# ЕЖЕДНЕВНЫЕ ОТЧЁТЫ
+# ========================================
+
 async def get_wb_orders(api_key: str, date_from: str, date_to: str) -> List[dict]:
+    """
+    Получает список заказов через /api/v1/supplier/orders
+    Args:
+        api_key (str): API-ключ продавца.
+        date_from (str): Дата начала периода в формате "YYYY-MM-DD".
+        date_to (str): Дата окончания периода в формате "YYYY-MM-DD".
+
+    Returns:
+        list[dict]: Список заказов. Основные поля:
+
+        📅 **Даты и статусы**
+            - `date` — дата и время заказа (МСК, UTC+3)
+            - `lastChangeDate` — дата и время последнего обновления (МСК, UTC+3)
+            - `isCancel` — признак отмены заказа
+            - `cancelDate` — дата отмены (если применимо)
+
+        📍 **География и склад**
+            - `warehouseName` — название склада отгрузки
+            - `warehouseType` — тип склада ("Склад WB"/"Склад продавца")
+            - `countryName` — страна доставки
+            - `oblastOkrugName` — федеральный округ
+            - `regionName` — регион доставки
+
+        🏷 **Товар и артикулы**
+            - `nmId` — артикул Wildberries
+            - `supplierArticle` — артикул продавца
+            - `barcode` — штрихкод товара
+            - `brand` — бренд
+            - `category` — категория товара
+            - `subject` — предметная группа
+            - `techSize` — размер товара
+
+        💰 **Цены и скидки**
+            - `totalPrice` — исходная цена (без скидок)
+            - `discountPercent` — процент скидки продавца
+            - `priceWithDisc` — цена с учётом скидки продавца
+            - `spp` — размер скидки Wildberries
+            - `finishedPrice` — итоговая цена (со всеми скидками кроме WB Кошелька)
+
+        📦 **Логистика и идентификаторы**
+            - `incomeID` — номер поставки
+            - `sticker` — идентификатор стикера
+            - `gNumber` — идентификатор корзины заказа
+            - `srid` — уникальный идентификатор заказа
+            - `isSupply` — признак договора поставки
+            - `isRealization` — признак договора реализации
+    """
+
     url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
     headers = {"Authorization": api_key}
     all_orders = []
@@ -141,7 +170,53 @@ async def get_wb_orders(api_key: str, date_from: str, date_to: str) -> List[dict
     return [r for r in all_orders if _is_within_date_range(r, start_dt, end_dt)]
 
 
+### НЕ ИСПОЛЬЗОВАЛАСЬ ###
+
 async def get_wb_sales(api_key: str, date_from: str, date_to: str) -> List[dict]:
+    """
+    Получает список продаж и возвратов через /api/v1/supplier/sales
+    Args:
+        api_key (str): API-ключ продавца.
+        date_from (str): Дата начала периода в формате "YYYY-MM-DD".
+        date_to (str): Дата окончания периода в формате "YYYY-MM-DD".
+
+    Returns:
+        list[dict]: Список продаж и возвратов. Основные поля:
+
+        📅 **Даты и идентификаторы**
+            - `date` — дата и время продажи (МСК, UTC+3)
+            - `lastChangeDate` — дата и время последнего обновления (МСК, UTC+3)
+            - `saleID` — уникальный ID операции (S********** — продажа, R********** — возврат)
+            - `srid` — уникальный ID заказа
+            - `gNumber` — ID корзины покупателя
+
+        📍 **География и склад**
+            - `warehouseName` — название склада отгрузки
+            - `warehouseType` — тип склада ("Склад WB"/"Склад продавца")
+            - `countryName`, `oblastOkrugName`, `regionName` — география доставки
+
+        🏷 **Товар и артикулы**
+            - `nmId` — артикул Wildberries
+            - `supplierArticle` — артикул продавца
+            - `barcode` — штрихкод товара
+            - `brand`, `category`, `subject` — характеристики товара
+            - `techSize` — размер товара
+            - `incomeID` — номер поставки
+
+        💰 **Цены и финансы**
+            - `totalPrice` — исходная цена (без скидок)
+            - `discountPercent` — процент скидки продавца
+            - `priceWithDisc` — цена с учётом скидки продавца
+            - `spp` — размер скидки Wildberries
+            - `finishedPrice` — фактическая цена с покупателя (со всеми скидками)
+            - `forPay` — сумма к перечислению продавцу
+            - `paymentSaleAmount` — скидка за оплату WB Кошельком
+
+        📦 **Дополнительная информация**
+            - `isSupply`, `isRealization` — признаки договоров
+            - `sticker` — идентификатор стикера
+    """
+
     url = "https://statistics-api.wildberries.ru/api/v1/supplier/sales"
     headers = {"Authorization": api_key}
     all_sales = []
@@ -186,39 +261,7 @@ async def get_wb_sales(api_key: str, date_from: str, date_to: str) -> List[dict]
     return [r for r in all_sales if _is_within_date_range(r, start_dt, end_dt)]
 
 
-async def _fetch_with_simple_retry_get(
-    session: aiohttp.ClientSession,
-    url: str,
-    headers: dict,
-    params: dict,
-    method_name: str,
-) -> tuple[int, Any]:
-    """GET-запрос с повторами при 429."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            async with session.get(url, headers=headers, params=params, timeout=20) as resp:
-                if resp.status == 200:
-                    return 200, await resp.json()
-                elif resp.status == 429:
-                    logger.warning(
-                        f"{method_name}: 429 Too Many Requests (попытка {attempt}/{MAX_RETRIES})"
-                    )
-                    if attempt < MAX_RETRIES:
-                        await asyncio.sleep(RETRY_DELAY)
-                        continue
-                    else:
-                        return 429, await resp.text()
-                else:
-                    return resp.status, await resp.text()
-        except Exception as e:
-            logger.error(f"{method_name}: исключение (попытка {attempt}): {e}")
-            if attempt < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
-                continue
-            else:
-                raise
-    raise RuntimeError("Недостижимо")
-
+### НЕ ИСПОЛЬЗОВАЛАСЬ ###
 
 async def get_wb_acceptance_report(
     api_key: str,
@@ -226,16 +269,29 @@ async def get_wb_acceptance_report(
     date_to: str,
 ) -> List[Dict[str, Any]]:
     """
-    Получает отчёт о платной приёмке за указанный период.
-
+    Получает отчёт о платной приёмке через API (создание задачи → ожидание → загрузка)
     Args:
-        api_key: API-ключ продавца.
-        date_from: Дата начала в формате "YYYY-MM-DD".
-        date_to: Дата окончания в формате "YYYY-MM-DD".
+        api_key (str): API-ключ продавца.
+        date_from (str): Дата начала периода в формате "YYYY-MM-DD".
+        date_to (str): Дата окончания периода в формате "YYYY-MM-DD".
 
     Returns:
-        Список записей из отчёта о платной приёмке.
+        list[dict]: Записи о платной приёмке товаров. Основные поля:
+
+        📦 **Приёмка и поставка**
+            - `shkCreateDate` — дата приёмки товара
+            - `giCreateDate` — дата создания поставки
+            - `incomeId` — номер поставки
+            - `count` — количество принятых товаров, шт.
+
+        🏷 **Идентификация товара**
+            - `nmID` — артикул Wildberries
+            - `subjectName` — предметная группа
+
+        💰 **Стоимость**
+            - `total` — суммарная стоимость приёмки (рубли с копейками)
     """
+
     headers = {"Authorization": api_key}
     start_dt = datetime.fromisoformat(f"{date_from}T00:00:00")
     end_dt = datetime.fromisoformat(f"{date_to}T23:59:59")
@@ -246,7 +302,7 @@ async def get_wb_acceptance_report(
             "dateFrom": date_from,
             "dateTo": date_to
         }
-        status, data = await _fetch_with_simple_retry_get(
+        status, data = await _fetch_with_simple_retry(
             session,
             ACCEPTANCE_BASE_URL,
             headers,
@@ -328,22 +384,56 @@ async def get_wb_acceptance_report(
             return []
 
 
+### НЕ ИСПОЛЬЗОВАЛАСЬ ###
+
 async def get_wb_paid_storage_report(
     api_key: str,
     date_from: str,
     date_to: str,
 ) -> List[Dict[str, Any]]:
     """
-    Получает отчёт о платном хранении за указанный период.
-
+    Получает отчёт о платном хранении через API (создание задачи → ожидание → загрузка)
     Args:
-        api_key: API-ключ продавца.
-        date_from: Дата начала в формате "YYYY-MM-DD".
-        date_to: Дата окончания в формате "YYYY-MM-DD".
+        api_key (str): API-ключ продавца.
+        date_from (str): Дата начала периода в формате "YYYY-MM-DD".
+        date_to (str): Дата окончания периода в формате "YYYY-MM-DD".
 
     Returns:
-        Список записей из отчёта о платном хранении.
+        list[dict]: Записи о платном хранении товаров. Основные поля:
+
+        📅 **Даты и расчёты**
+            - `date` — дата расчёта/перерасчёта
+            - `originalDate` — дата первоначального расчёта (при перерасчёте)
+            - `calcType` — способ расчёта
+            - `tariffFixDate` — дата фиксации тарифа
+            - `tariffLowerDate` — дата понижения тарифа
+
+        📍 **Склады и коэффициенты**
+            - `warehouse` — название склада
+            - `officeId` — ID склада
+            - `warehouseCoef` — коэффициент склада
+            - `logWarehouseCoef` — коэффициент логистики и хранения
+
+        🏷 **Товар и идентификаторы**
+            - `nmId` — артикул Wildberries
+            - `vendorCode` — артикул продавца
+            - `chrtId` — ID размера
+            - `barcode` — штрихкод
+            - `size` — размер товара
+            - `brand`, `subject` — бренд и предмет
+            - `giId` — ID поставки
+
+        📊 **Объёмы и количество**
+            - `volume` — объём товара
+            - `barcodesCount` — количество единиц товара
+            - `palletCount` — количество паллет
+            - `palletPlaceCode` — код паллетоместа
+
+        💰 **Стоимость и скидки**
+            - `warehousePrice` — сумма хранения
+            - `loyaltyDiscount` — скидка программы лояльности (рубли)
     """
+
     headers = {"Authorization": api_key}
     start_dt = datetime.fromisoformat(f"{date_from}T00:00:00")
     end_dt = datetime.fromisoformat(f"{date_to}T23:59:59")
@@ -354,7 +444,7 @@ async def get_wb_paid_storage_report(
             "dateFrom": date_from,
             "dateTo": date_to
         }
-        status, data = await _fetch_with_simple_retry_get(
+        status, data = await _fetch_with_simple_retry(
             session,
             PAID_STORAGE_BASE_URL,
             headers,
@@ -434,6 +524,10 @@ async def get_wb_paid_storage_report(
             return []
 
 
+# ========================================
+# ЕЖЕНЕДЕЛЬНЫЕ ОТЧЁТЫ
+# ========================================
+
 async def get_wb_weekly_report(api_key: str, date_from: str, date_to: str) -> list:
     """
     Получает еженедельный отчёт через /api/v5/supplier/reportDetailByPeriod
@@ -503,3 +597,35 @@ async def get_wb_weekly_report(api_key: str, date_from: str, date_to: str) -> li
         except Exception as e:
             logger.error(f"Ошибка при запросе weekly-отчёта: {e}")
             return []
+
+
+# ========================================
+# ОСТАЛЬНЫЕ ФУНКЦИИ
+# ========================================
+
+async def get_supplier_name(api_key: str) -> str:
+    """
+    Получает название магазина из Wildberries API через /api/v1/seller-info.
+    Использует tradeMark, если доступен, иначе name.
+    """
+    url = "https://common-api.wildberries.ru/api/v1/seller-info"
+    headers = {"Authorization": api_key}
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    seller_info = data.get("data", {})
+                    logger.info(f"Полученные данные продавца: {data}")
+                    trade_mark = seller_info.get("tradeMark")
+                    legal_name = data.get("name", "")
+
+                    return legal_name.strip()
+                else:
+                    logger.warning(
+                        f"Не удалось получить seller-info: статус {resp.status}")
+                    return "Магазин"
+        except Exception as e:
+            logger.error(f"Ошибка при получении названия магазина: {e}")
+            return "Магазин"
