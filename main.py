@@ -234,7 +234,7 @@ async def prompt_add_shop(callback: CallbackQuery, state: FSMContext):
         await callback.message.delete()
     except:
         pass
-    await callback.message.answer("Пожалуйста, отправьте ваш API-ключ Wildberries (статистика x64).")
+    await callback.message.answer("Пожалуйста, отправьте ваш API-ключ Wildberries")
     await state.set_state(ShopStates.get_api_key)
 
 
@@ -534,7 +534,8 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ShopStates.main_menu)
 
 
-@dp.callback_query(F.data == "back_to_settings", StateFilter(ShopStates.change_api_key, ShopStates.set_tax_rate))
+# @dp.callback_query(F.data == "back_to_settings", StateFilter(ShopStates.change_api_key, ShopStates.set_tax_rate))
+@dp.callback_query(F.data == "back_to_settings")
 async def back_to_settings_from_input(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await send_settings_menu(callback.from_user.id)
