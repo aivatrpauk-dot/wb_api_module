@@ -139,8 +139,8 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
     """Заполняет лист 'P&L недельный' на основе данных из reportDetailByPeriod.
     
         Дата                   -      rr_dt
-        Количество заказов     -      
-        Заказы                 -      totalPrice * (1 - discountPercent/100)
+        Количество заказов     -      количество строк из daily_data 
+        Заказы                 -      totalPrice * (1 - discountPercent/100) из daily_data
         Выкупили               -      quantity (для продаж)
         Продажи до СПП         -      retail_amount * quantity (для продаж)
         Себестоймость продаж   -      
@@ -451,7 +451,26 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
 # ========================================
 
 async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, daily_data):
-    """Заполняет лист 'Товарная аналитика (недельная)' по артикулам."""
+    """
+    Заполняет лист 'Товарная аналитика (недельная)' по артикулам.
+        Артикул (nmId)         -      nm_id
+        Заказы, руб            -      totalPrice * (1 - discountPercent/100) из daily_data
+        Выкупы, руб            -      retail_amount * quantity (для продаж)
+        Возвраты по браку, руб -      retail_amount * quantity (для возвратов)
+        Заказы, шт             -      количество заказов из daily_data
+        Выкупы, шт             -      quantity (для продаж)
+        Возвраты по браку, шт  -      
+        % выкупа               -      
+        Комиссия               -      sales_before_spp - ppvz_for_pay
+        Логистика прямая       -      delivery_rub - rebill_logistic_cost
+        Логистика обратная     -      rebill_logistic_cost
+        Хранение               -      storage_fee
+        Приемка                -      acceptance
+        Реклама                -      deduction
+        Штрафы                 -      penalty
+        Корректировки          -      additional_payment + cashback_discount + cashback_amount + cashback_commission_change
+    """
+
     try:
         try:
             ws = spreadsheet.worksheet("Товарная аналитика (недельная)")
