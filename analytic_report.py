@@ -753,12 +753,12 @@ async def fill_product_analytics_daily_sheet(spreadsheet, products, acceptance_b
 # ========================================
 
 async def fill_pnl_report(
-        spreadsheet_id: str,  # <-- Этот аргумент в исходной логике не использовался, но мы его оставим
-        shop_id: int,
-        start_date: datetime,
-        end_date: datetime,
-        full_data=None
-) -> bool:  # <-- В исходном коде функция возвращала bool, теперь будет возвращать URL или None
+    spreadsheet_id: str,
+    shop_id: int,
+    start_date: datetime,
+    end_date: datetime,
+    full_data=None
+) -> bool: # <-- Возвращает bool, как и раньше
     """
     Заполняет отчет P&L в Google Sheets.
     """
