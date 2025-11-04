@@ -38,8 +38,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Настройки ---
-BOT_TOKEN = "7569142757:AAH_qYkixvV-4mSrcQfnagpIlJJc2YMLCW0"
-PHOTO_PATH = Path("start_image.jpeg")
+#BOT_TOKEN = "7569142757:AAH_qYkixvV-4mSrcQfnagpIlJJc2YMLCW0"
+#PHOTO_PATH = Path("start_image.jpeg")
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
