@@ -528,9 +528,10 @@ async def get_wb_paid_storage_report(
 # ЕЖЕНЕДЕЛЬНЫЕ ОТЧЁТЫ
 # ========================================
 
-async def get_wb_weekly_report(api_key: str, date_from: str, date_to: str) -> list:
+async def get_wb_weekly_report(api_key: str, date_from: str, date_to: str, period: str = "weekly") -> list:
     """
-    Получает еженедельный отчёт через /api/v5/supplier/reportDetailByPeriod
+    Получает детализированный отчёт через /api/v5/supplier/reportDetailByPeriod.
+    Поддерживает пагинацию через rrdid и выбор периода (weekly/daily).
     Args:
         api_key (str): API-ключ продавца.
         date_from (str): Дата начала периода в формате "YYYY-MM-DD".
@@ -572,31 +573,48 @@ async def get_wb_weekly_report(api_key: str, date_from: str, date_to: str) -> li
             - `srid`, `order_uid` — идентификаторы заказов
             - `is_legal_entity` — признак B2B-продажи
     """
-    
+
     url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
     headers = {
         "Authorization": api_key,
         "Content-Type": "application/json"
     }
-    params = {
-        "dateFrom": date_from,
-        "dateTo": date_to
-    }
+
+    all_data = []
+    rrdid = 0
 
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    logger.info(
-                        f"Получено {len(data)} записей из weekly-отчёта")
-                    return data
-                else:
-                    logger.error(f"Ошибка API: {resp.status} — {await resp.text()}")
-                    return []
-        except Exception as e:
-            logger.error(f"Ошибка при запросе weekly-отчёта: {e}")
-            return []
+        while True:
+            params = {
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                "limit": 100000,
+                "rrdid": rrdid,
+                "period": period
+            }
+            try:
+                async with session.get(url, headers=headers, params=params, timeout=60) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if not data:
+                            logger.info(f"Получение {period}-отчёта завершено. Всего записей: {len(all_data)}")
+                            break
+
+                        all_data.extend(data)
+                        rrdid = data[-1].get("rrd_id")
+                        if not rrdid:
+                            logger.warning("rrd_id не найден, прерывание пагинации.")
+                            break
+
+                        logger.info(
+                            f"Получена страница {period}-отчёта. Записей: {len(data)}. Следующий rrdid: {rrdid}")
+                    else:
+                        logger.error(f"Ошибка API ({period}-отчёт): {resp.status} — {await resp.text()}")
+                        return None  # Возвращаем None в случае ошибки
+            except Exception as e:
+                logger.error(f"Ошибка при запросе {period}-отчёта: {e}")
+                return None  # Возвращаем None в случае ошибки
+    return all_data
 
 
 # ========================================

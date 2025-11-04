@@ -11,7 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-    FSInputFile
+    FSInputFile, KeyboardButton
 )
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -23,7 +23,8 @@ import database as db
 from analytic_report import (
     create_user_spreadsheet,
     schedule_sheet_deletion,
-    fill_pnl_report
+    fill_pnl_report,
+    generate_daily_unit_economics_report
 )
 from wb_api import get_supplier_name
 from token_daily_refresh import refresh_token
@@ -380,38 +381,25 @@ async def generate_and_send_report(callback: CallbackQuery, state: FSMContext):
 
     msg = await bot.send_message(
         user_id,
-        f"📊 Генерирую отчет с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}..."
+        f"📊 Начинаю генерацию отчета с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}..."
     )
 
-    ### ИЗМЕНЕНИЕ ###
-    # Старый код:
-    # report_result, report_url = await generate_financial_report(user_id, start_date, end_date)
+    # --- ЗАМЕНА ЛОГИКИ ---
+    report_result, report_url = await generate_daily_unit_economics_report(user_id, start_date, end_date)
 
-    # Новый код:
-    # Получаем sheet_id из базы. В исходной логике он не использовался,
-    # но мы должны его передать в функцию.
-    _, _, sheet_id, _ = db.get_user_data(user_id)
-
-    # Вызываем нашу обновленную функцию
-    report_url = await fill_pnl_report(sheet_id, user_id, start_date, end_date)
-
-    # Запланировать удаление. ID таблицы берем из URL
     if report_url:
         spreadsheet_id_to_delete = report_url.split('/d/')[1].split('/')[0]
         asyncio.create_task(schedule_sheet_deletion(spreadsheet_id_to_delete))
 
-    # Формируем ответ пользователю
-    if report_url:
-        report_result = "📊 Отчет успешно создан!\nОтчет будет доступен 12 часов."
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть отчёт", url=report_url)]
-        ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть отчёт", url=report_url)]])
+
         await msg.edit_text(report_result, reply_markup=keyboard)
     else:
-        report_result = "❌ Ошибка: не удалось сгенерировать отчет. Пожалуйста, попробуйте позже."
         await msg.edit_text(report_result)
 
     await send_main_menu(callback)
+
 
 
 async def generate_financial_report(user_id, start_date, end_date):

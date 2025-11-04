@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import asyncio
 import database as db
 from wb_api import get_wb_orders, get_wb_weekly_report
-from unit_economics_report import create_unit_economics_sheet
+from unit_economics_report import create_unit_economics_sheet, fill_unit_economics_sheet
 
 
 
@@ -855,3 +855,63 @@ async def schedule_sheet_deletion(sheet_id: str, delay_hours: int = 12):
             logger.info(f"Таблица {sheet_id} удалена")
     except Exception as e:
         logger.error(f"Ошибка удаления таблицы: {e}")
+
+
+###########################################################################################################################
+# НОВЫЙ БЛОК ДЛЯ ОТЧЕТА "ЮНИТ ЭКОНОМИКА"
+# ###########################################################################################################################
+
+async def generate_daily_unit_economics_report(user_id: int, start_date: datetime, end_date: datetime):
+    """
+    Полный цикл генерации отчета "Юнит экономика" по дням и артикулам.
+    """
+    # Импортируем bot здесь, чтобы избежать циклических зависимостей
+    from main import bot
+
+    # 1. Проверка периода (не более 31 дня)
+    if (end_date - start_date).days > 30:
+        logger.warning(f"Пользователь {user_id} запросил слишком большой период. Отклонено.")
+        return "❌ Ошибка: Период отчета не должен превышать 31 день.", None
+
+    # 2. Получение данных
+    api_key, _, _, shop_name = db.get_user_data(user_id)
+    if not api_key:
+        return "❌ Ошибка: API-ключ не найден. Пожалуйста, добавьте магазин в настройках.", None
+
+    date_from_str = start_date.strftime("%Y-%m-%d")
+    date_to_str = end_date.strftime("%Y-%m-%d")
+
+    msg_status = await bot.send_message(user_id, "⏳ Запрашиваю данные из Wildberries API...")
+
+    # Вызываем обновленную функцию с period="daily"
+    report_task = get_wb_weekly_report(api_key, date_from_str, date_to_str, period="daily")
+    orders_task = get_wb_orders(api_key, date_from_str, date_to_str)
+    daily_report_data, orders_data = await asyncio.gather(report_task, orders_task)
+
+    if daily_report_data is None or orders_data is None:
+        return "❌ Ошибка: Не удалось получить данные от Wildberries. Попробуйте позже.", None
+
+    await msg_status.edit_text("⚙️ Создаю и форматирую Google Таблицу...")
+
+    # 3. Создание и форматирование таблицы
+    gc = await get_gspread_client()
+    if not gc:
+        return "❌ Ошибка: Не удалось подключиться к Google API.", None
+
+    shop_display_name = shop_name or f"Магазин {user_id}"
+    spreadsheet_title = f"Юнит-экономика: {shop_display_name} ({start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m.%Y')})"
+    spreadsheet = gc.create(spreadsheet_title)
+    spreadsheet.share(None, perm_type='anyone', role='reader')
+
+    default_sheet = spreadsheet.get_worksheet(0)
+
+    await create_unit_economics_sheet(spreadsheet)
+
+    await msg_status.edit_text("📝 Заполняю отчет данными...")
+
+    # 4. Наполнение данными
+    await fill_unit_economics_sheet(spreadsheet, daily_report_data, orders_data)
+
+    spreadsheet.del_worksheet(default_sheet)
+
+    return "✅ Отчет успешно создан!", spreadsheet.url
