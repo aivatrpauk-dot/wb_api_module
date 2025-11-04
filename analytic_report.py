@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 import asyncio
 import database as db
 from wb_api import get_wb_orders, get_wb_weekly_report
+from unit_economics_report import create_unit_economics_sheet
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -750,12 +753,12 @@ async def fill_product_analytics_daily_sheet(spreadsheet, products, acceptance_b
 # ========================================
 
 async def fill_pnl_report(
-    spreadsheet_id: str,
-    shop_id: int,
-    start_date: datetime,
-    end_date: datetime,
-    full_data=None
-) -> bool:
+        spreadsheet_id: str,  # <-- Этот аргумент в исходной логике не использовался, но мы его оставим
+        shop_id: int,
+        start_date: datetime,
+        end_date: datetime,
+        full_data=None
+) -> bool:  # <-- В исходном коде функция возвращала bool, теперь будет возвращать URL или None
     """
     Заполняет отчет P&L в Google Sheets.
     """
@@ -768,7 +771,6 @@ async def fill_pnl_report(
         has_weekly = False
         weekly_start = weekly_end = None
 
-        # Прошлые недели: всё, что строго до понедельника текущей недели
         if end_date < current_week_start:
             has_weekly = True
             weekly_start, weekly_end = start_date, end_date
@@ -779,17 +781,32 @@ async def fill_pnl_report(
         # === 3. Создаём таблицу ===
         gc = await get_gspread_client()
         if not gc:
-            return False
+            return None  # ### ИЗМЕНЕНИЕ ### (было return False)
 
-        spreadsheet_title = f"Отчет: {shop_id} ({start_date.strftime('%d.%m.%Y')}-{end_date.strftime('%d.%m.%Y')})"
+        ### ИЗМЕНЕНИЕ ###
+        # В исходной логике spreadsheet_id передавался, но не использовался для открытия.
+        # Вместо этого создавалась новая таблица. Мы сохраним эту логику.
+
+        # Получаем shop_name из базы данных для заголовка таблицы
+        _, _, _, shop_name = db.get_user_data(shop_id)
+        shop_display_name = shop_name or f"Магазин {shop_id}"
+
+        spreadsheet_title = f"Отчет: {shop_display_name} ({start_date.strftime('%d.%m.%Y')}-{end_date.strftime('%d.%m.%Y')})"
         logger.info(f"Создание таблицы: {spreadsheet_title}")
+
+        # spreadsheet = gc.open_by_key(spreadsheet_id) # Это была бы альтернативная логика
         spreadsheet = gc.create(spreadsheet_title)
         spreadsheet.share(None, perm_type='anyone', role='reader')
+
+        ### ИЗМЕНЕНИЕ: Создаем лист "Юнит экономика" ###
+        await create_unit_economics_sheet(spreadsheet)
 
         api_key, _, _, _ = db.get_user_data(shop_id)
         if not api_key:
             logger.error("API ключ не найден")
-            return False
+            # В случае ошибки, лучше удалить созданную пустую таблицу
+            gc.del_spreadsheet(spreadsheet.id)
+            return None  # ### ИЗМЕНЕНИЕ ### (было return False)
 
         # === 4. Обработка WEEKLY-части ===
         if has_weekly:
@@ -799,13 +816,28 @@ async def fill_pnl_report(
 
             weekly_raw_data = await get_wb_weekly_report(api_key, date_from_w, date_to_w)
             daily_orders_data = await get_wb_orders(api_key, date_from_w, date_to_w)
+
+            # Заполняем существующие листы
             await fill_pnl_weekly_sheet(spreadsheet, weekly_raw_data, daily_orders_data, weekly_start, weekly_end)
             await fill_product_analytics_weekly_sheet(spreadsheet, weekly_raw_data, daily_orders_data)
-        return spreadsheet.url
+
+        else:
+            # Если отчет только за текущую неделю, он будет пустым, но структура будет создана
+            logger.info("Данные для отчета (прошлые недели) отсутствуют, создана только структура.")
+            # Можно добавить пустые листы P&L и Товарная аналитика для консистентности
+            try:
+                spreadsheet.add_worksheet(title="P&L недельный", rows=1, cols=1)
+                spreadsheet.add_worksheet(title="Товарная аналитика (недельная)", rows=1, cols=1)
+                default_sheet = spreadsheet.get_worksheet(0)
+                spreadsheet.del_worksheet(default_sheet)
+            except Exception:
+                pass  # Если листы уже есть, ничего страшного
+
+        return spreadsheet.url  ### ИЗМЕНЕНИЕ ### (было return True или False)
 
     except Exception as e:
         logger.error(f"Ошибка в fill_pnl_report: {e}", exc_info=True)
-        return False
+        return None  ### ИЗМЕНЕНИЕ ### (было return False)
 
 ############################################################################################################################
 
