@@ -107,7 +107,7 @@ def _apply_data_formatting(worksheet: gspread.Worksheet, last_row: int):
         worksheet.format(r, {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
 
 
-async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_report_data: list, orders_data: list):
+async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_report_data: list, orders_data: list, ad_costs: dict):
     """
     Агрегирует данные и заполняет лист "Юнит экономика".
     """
@@ -153,8 +153,6 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             products[key]["acceptance_rub"] += row.get("acceptance", 0)
             products[key]["storage_rub"] += row.get("storage_fee", 0)
             products[key]["penalty_rub"] += row.get("penalty", 0)
-            # ВАЖНО: Реклама пока берется из общего поля 'deduction'. Для точной связки нужен Advert API.
-            products[key]["ads_rub"] += row.get("deduction", 0)
             products[key]["adjustments_rub"] += row.get("additional_payment", 0)
 
         # 2. Формирование строк для таблицы
@@ -163,7 +161,11 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
         for key in sorted(products.keys()):
             date_str, nm_id = key
             p = products[key]
+            # Получаем расходы на рекламу из агрегированного словаря
+            advertising_cost = ad_costs.get(key, 0.0)
 
+            # Рассчитываем ДРР (% от продаж)
+            drr_percent = (advertising_cost / p["sales_rub"]) if p["sales_rub"] > 0 else 0
             buyout_percent = (p["sales_pcs"] / p["orders_pcs"]) if p["orders_pcs"] > 0 else 0
 
             row_data = [
@@ -179,8 +181,8 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
                 p["commission_rub"], 0,  # Комиссия %
                 p["logistics_forward_rub"], p["logistics_reverse_rub"],
                 0, 0,  # % логистики, Логистика на ед
-                p["ads_rub"], 0,  # Реклама %
-                0,  # % ДРР
+                advertising_cost, 0,  # Реклама руб, Реклама %
+                drr_percent,  # % ДРР
                 p["acceptance_rub"], p["penalty_rub"], p["adjustments_rub"]
             ]
             rows_to_insert.append(row_data)

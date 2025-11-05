@@ -11,6 +11,7 @@ import asyncio
 import database as db
 from wb_api import get_wb_orders, get_wb_weekly_report
 from unit_economics_report import create_unit_economics_sheet, fill_unit_economics_sheet
+from wb_advert import get_aggregated_ad_costs
 
 
 
@@ -167,9 +168,10 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
 
     try:
         try:
-            ws = spreadsheet.get_worksheet(0)
-            ws.update_title("P&L недельный")
-        except:
+            # Пытаемся получить лист по имени, если он уже есть
+            ws = spreadsheet.worksheet("P&L недельный")
+        except gspread.WorksheetNotFound:
+            # Если листа нет - создаем новый
             ws = spreadsheet.add_worksheet(
                 title="P&L недельный", rows=500, cols=30)
 
@@ -753,92 +755,81 @@ async def fill_product_analytics_daily_sheet(spreadsheet, products, acceptance_b
 # ========================================
 
 async def fill_pnl_report(
-    spreadsheet_id: str,
-    shop_id: int,
-    start_date: datetime,
-    end_date: datetime,
-    full_data=None
-) -> bool: # <-- Возвращает bool, как и раньше
+        spreadsheet_id: str,
+        shop_id: int,
+        start_date: datetime,
+        end_date: datetime,
+        full_data=None
+) -> str:  # Возвращаем URL (str) или None
     """
-    Заполняет отчет P&L в Google Sheets.
+    Создает ОДНУ Google Таблицу и заполняет ее всеми отчетами,
+    корректно обрабатывая периоды без данных.
     """
+    # Инициализируем spreadsheet здесь, чтобы иметь к ней доступ в блоке except
+    spreadsheet = None
+    gc = None
     try:
-        # === 1. Определяем границы текущей недели ===
-        today = datetime.utcnow().date()
-        current_week_start, _ = get_current_week_range(datetime.combine(today, datetime.min.time()))
-
-        # === 2. Разделяем периоды ===
-        has_weekly = False
-        weekly_start = weekly_end = None
-
-        if end_date < current_week_start:
-            has_weekly = True
-            weekly_start, weekly_end = start_date, end_date
-        elif start_date < current_week_start:
-            has_weekly = True
-            weekly_start, weekly_end = start_date, current_week_start - timedelta(seconds=1)
-
-        # === 3. Создаём таблицу ===
+        # === 1. Получение API ключа и создание Google Таблицы ===
         gc = await get_gspread_client()
-        if not gc:
-            return None  # ### ИЗМЕНЕНИЕ ### (было return False)
+        if not gc: return None
 
-        ### ИЗМЕНЕНИЕ ###
-        # В исходной логике spreadsheet_id передавался, но не использовался для открытия.
-        # Вместо этого создавалась новая таблица. Мы сохраним эту логику.
+        api_key, _, _, shop_name = db.get_user_data(shop_id)
+        if not api_key:
+            logger.error(f"API ключ не найден для shop_id {shop_id}")
+            return None
 
-        # Получаем shop_name из базы данных для заголовка таблицы
-        _, _, _, shop_name = db.get_user_data(shop_id)
         shop_display_name = shop_name or f"Магазин {shop_id}"
-
-        spreadsheet_title = f"Отчет: {shop_display_name} ({start_date.strftime('%d.%m.%Y')}-{end_date.strftime('%d.%m.%Y')})"
-        logger.info(f"Создание таблицы: {spreadsheet_title}")
-
-        # spreadsheet = gc.open_by_key(spreadsheet_id) # Это была бы альтернативная логика
+        spreadsheet_title = f"Фин. отчет: {shop_display_name} ({start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m.%Y')})"
         spreadsheet = gc.create(spreadsheet_title)
         spreadsheet.share(None, perm_type='anyone', role='reader')
 
-        ### ИЗМЕНЕНИЕ: Создаем лист "Юнит экономика" ###
+        logger.info(f"Создана таблица: {spreadsheet.url}")
+        default_sheet = spreadsheet.get_worksheet(0)
+
+        # === 2. ОПТИМИЗИРОВАННОЕ получение данных от WB API ===
+        date_from_str = start_date.strftime("%Y-%m-%d")
+        date_to_str = end_date.strftime("%Y-%m-%d")
+
+        logger.info("Запрашиваю данные от WB API (единый запрос для отчетов + заказы)...")
+
+        report_data_task = get_wb_weekly_report(api_key, date_from_str, date_to_str, period="daily")
+        orders_task = get_wb_orders(api_key, date_from_str, date_to_str)
+
+        report_data, orders_data = await asyncio.gather(report_data_task, orders_task)
+
+        # Дополнительно запрашиваем расходы на рекламу
+        logger.info("Запрашиваю данные по расходам на рекламу...")
+        # Передаем start_date и end_date, которые уже есть в функции
+        ad_costs = await get_aggregated_ad_costs(api_key, start_date, end_date)
+
+        # Проверяем на критическую ошибку API (None), пустой список [] - это валидный ответ
+        if report_data is None or orders_data is None:
+            logger.error("Критическая ошибка API: не удалось получить данные. Прерывание.")
+            raise Exception("API data fetch failed")
+
+        # === 3. Создание и заполнение листов БЕЗ ЛИШНИХ УСЛОВИЙ ===
+        logger.info("Заполняю листы отчетов...")
+
+        # Эти функции должны вызываться ВСЕГДА. Они умеют обрабатывать пустые списки данных.
+        await fill_pnl_weekly_sheet(spreadsheet, report_data, orders_data, start_date, end_date)
+        await fill_product_analytics_weekly_sheet(spreadsheet, report_data, orders_data)
         await create_unit_economics_sheet(spreadsheet)
+        await fill_unit_economics_sheet(spreadsheet, report_data, orders_data, ad_costs)
 
-        api_key, _, _, _ = db.get_user_data(shop_id)
-        if not api_key:
-            logger.error("API ключ не найден")
-            # В случае ошибки, лучше удалить созданную пустую таблицу
-            gc.del_spreadsheet(spreadsheet.id)
-            return None  # ### ИЗМЕНЕНИЕ ### (было return False)
+        # Удаляем стандартный лист, созданный по умолчанию
+        spreadsheet.del_worksheet(default_sheet)
 
-        # === 4. Обработка WEEKLY-части ===
-        if has_weekly:
-            logger.info(f"Weekly период: {weekly_start} — {weekly_end}")
-            date_from_w = weekly_start.strftime("%Y-%m-%d")
-            date_to_w = weekly_end.strftime("%Y-%m-%d")
-
-            weekly_raw_data = await get_wb_weekly_report(api_key, date_from_w, date_to_w)
-            daily_orders_data = await get_wb_orders(api_key, date_from_w, date_to_w)
-
-            # Заполняем существующие листы
-            await fill_pnl_weekly_sheet(spreadsheet, weekly_raw_data, daily_orders_data, weekly_start, weekly_end)
-            await fill_product_analytics_weekly_sheet(spreadsheet, weekly_raw_data, daily_orders_data)
-
-        else:
-            # Если отчет только за текущую неделю, он будет пустым, но структура будет создана
-            logger.info("Данные для отчета (прошлые недели) отсутствуют, создана только структура.")
-            # Можно добавить пустые листы P&L и Товарная аналитика для консистентности
-            try:
-                spreadsheet.add_worksheet(title="P&L недельный", rows=1, cols=1)
-                spreadsheet.add_worksheet(title="Товарная аналитика (недельная)", rows=1, cols=1)
-                default_sheet = spreadsheet.get_worksheet(0)
-                spreadsheet.del_worksheet(default_sheet)
-            except Exception:
-                pass  # Если листы уже есть, ничего страшного
-
-        return spreadsheet.url  ### ИЗМЕНЕНИЕ ### (было return True или False)
+        return spreadsheet.url
 
     except Exception as e:
-        logger.error(f"Ошибка в fill_pnl_report: {e}", exc_info=True)
-        return None  ### ИЗМЕНЕНИЕ ### (было return False)
-
+        logger.error(f"Критическая ошибка в fill_pnl_report: {e}", exc_info=True)
+        # Если что-то пошло не так, и таблица была создана, пытаемся ее удалить
+        if spreadsheet and gc:
+            try:
+                gc.del_spreadsheet(spreadsheet.id)
+            except Exception as del_e:
+                logger.error(f"Не удалось удалить частично созданную таблицу: {del_e}")
+        return None
 ############################################################################################################################
 
 

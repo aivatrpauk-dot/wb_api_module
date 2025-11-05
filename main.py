@@ -358,80 +358,33 @@ async def generate_and_send_report(callback: CallbackQuery, state: FSMContext):
 
     user_id = callback.from_user.id
     user_data = await state.get_data()
-    start_date_str = user_data.get("start_date")
-    end_date_str = user_data.get("end_date")
+    start_date = datetime.fromisoformat(user_data.get("start_date"))
+    end_date = datetime.fromisoformat(user_data.get("end_date"))
+    await state.clear()  # Очищаем состояние
 
-    # Очищаем данные в FSM
-    await state.update_data(start_date=None, end_date=None)
-
-    # Проверка наличия дат
-    if not start_date_str or not end_date_str:
-        await bot.send_message(user_id, "❌ Ошибка: не удалось определить даты отчёта.")
-        await send_main_menu(callback)
-        return
-
-    try:
-        start_date = datetime.fromisoformat(start_date_str)
-        end_date = datetime.fromisoformat(end_date_str)
-    except Exception as e:
-        logger.error(f"Ошибка парсинга дат: {e}")
-        await bot.send_message(user_id, "❌ Ошибка: некорректный формат дат.")
-        await send_main_menu(callback)
-        return
-
-    start_date = datetime.fromisoformat(start_date_str)
-    end_date = datetime.fromisoformat(end_date_str)
-
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-
-    # 1. Запускаем генерацию ОСНОВНОГО отчета (старая логика)
-    msg_main = await bot.send_message(
+    msg = await bot.send_message(
         user_id,
-        f"📊 Генерирую основной отчет с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}..."
+        f"📊 Генерирую отчет с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}..."
     )
 
-    # Получаем sheet_id из базы, как и раньше
+    # Вызываем ЕДИНСТВЕННУЮ управляющую функцию
     _, _, sheet_id, _ = db.get_user_data(user_id)
-    main_report_url = await fill_pnl_report(sheet_id, user_id, start_date, end_date)
+    report_url = await fill_pnl_report(sheet_id, user_id, start_date, end_date)
 
-    if main_report_url:
-        main_spreadsheet_id = main_report_url.split('/d/')[1].split('/')[0]
-        asyncio.create_task(schedule_sheet_deletion(main_spreadsheet_id))
+    if report_url:
+        spreadsheet_id_to_delete = report_url.split('/d/')[1].split('/')[0]
+        asyncio.create_task(schedule_sheet_deletion(spreadsheet_id_to_delete))
 
-        # Формируем и отправляем сообщение для основного отчета
-        main_report_text = "📊 Основной отчет успешно создан!\nОтчет будет доступен 12 часов."
-        main_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть основной отчёт", url=main_report_url)]
+        # Возвращаем исходный текст
+        report_text = "📊 Отчет успешно создан!\nОтчет будет доступен 12 часов."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть отчёт", url=report_url)]
         ])
-        await msg_main.edit_text(main_report_text, reply_markup=main_keyboard)
+        await msg.edit_text(report_text, reply_markup=keyboard)
     else:
-        await msg_main.edit_text("❌ Ошибка: не удалось сгенерировать основной отчет.")
+        await msg.edit_text("❌ Ошибка: не удалось сгенерировать отчет. Попробуйте позже или выберите другой период.")
 
-    # 2. Запускаем генерацию НОВОГО отчета "Юнит Экономика"
-    msg_unit = await bot.send_message(
-        user_id,
-        "📈 Генерирую дополнительный отчет 'Юнит Экономика'..."
-    )
-
-    unit_report_result, unit_report_url = await generate_daily_unit_economics_report(user_id, start_date, end_date)
-
-    if unit_report_url:
-        unit_spreadsheet_id = unit_report_url.split('/d/')[1].split('/')[0]
-        asyncio.create_task(schedule_sheet_deletion(unit_spreadsheet_id))
-
-        # Формируем и отправляем сообщение для нового отчета
-        # Возвращаем текст про 12 часов
-        unit_report_text = f"{unit_report_result}\nОтчет будет доступен 12 часов."
-        unit_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть 'Юнит Экономику'", url=unit_report_url)]
-        ])
-        await msg_unit.edit_text(unit_report_text, reply_markup=unit_keyboard)
-    else:
-        await msg_unit.edit_text(unit_report_result)  # В unit_report_result уже есть текст ошибки
-
-    # 3. Возвращаем пользователя в главное меню
     await send_main_menu(callback)
-
 
 
 async def generate_financial_report(user_id, start_date, end_date):
