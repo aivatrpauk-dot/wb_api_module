@@ -384,13 +384,13 @@ async def get_wb_acceptance_report(
             return []
 
 
-### НЕ ИСПОЛЬЗОВАЛАСЬ ###
+### Платное хранение - теперь используем ###
 
 async def get_wb_paid_storage_report(
     api_key: str,
     date_from: str,
     date_to: str,
-) -> List[Dict[str, Any]]:
+) -> List[Dict[str, Any]] | None:
     """
     Получает отчёт о платном хранении через API (создание задачи → ожидание → загрузка)
     Args:

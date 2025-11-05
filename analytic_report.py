@@ -534,7 +534,7 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         for row in weekly_data:
             nm_id = row.get("nm_id")
             if not nm_id:
-                logger.warning(f"Пропущена строка без nm_id: {row}")
+                #logger.warning(f"Пропущена строка без nm_id: {row}")
                 continue
 
             doc_type = (row.get("doc_type_name") or "").lower()
@@ -798,9 +798,12 @@ async def fill_pnl_report(
         report_data, orders_data = await asyncio.gather(report_data_task, orders_task)
 
         # Дополнительно запрашиваем расходы на рекламу
-        logger.info("Запрашиваю данные по расходам на рекламу...")
-        # Передаем start_date и end_date, которые уже есть в функции
-        ad_costs = await get_aggregated_ad_costs(api_key, start_date, end_date)
+        # Шаг 1: Собираем уникальные nmId из данных заказов (это самый надежный источник)
+        target_nm_ids = {order['nmId'] for order in orders_data if 'nmId' in order}
+        logger.info(f"Found {len(target_nm_ids)} unique nmIds in the report period for ad cost fetching.")
+
+        # Запрашиваем расходы на рекламу только для этих артикулов
+        ad_costs = await get_aggregated_ad_costs(api_key, start_date, end_date, target_nm_ids)
 
         # Проверяем на критическую ошибку API (None), пустой список [] - это валидный ответ
         if report_data is None or orders_data is None:
