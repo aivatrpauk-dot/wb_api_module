@@ -434,94 +434,69 @@ async def get_wb_paid_storage_report(
             - `loyaltyDiscount` — скидка программы лояльности (рубли)
     """
 
+    logger.info("--- [START] Fetching paid storage report ---")
     headers = {"Authorization": api_key}
-    start_dt = datetime.fromisoformat(f"{date_from}T00:00:00")
-    end_dt = datetime.fromisoformat(f"{date_to}T23:59:59")
+    base_url = "https://seller-analytics-api.wildberries.ru/api/v1/paid_storage"
 
     async with aiohttp.ClientSession() as session:
-        # 1. Создать задачу на формирование отчёта (GET с параметрами)
-        params = {
-            "dateFrom": date_from,
-            "dateTo": date_to
-        }
-        status, data = await _fetch_with_simple_retry(
-            session,
-            PAID_STORAGE_BASE_URL,
-            headers,
-            params,
-            "Paid Storage Report Create"
-        )
+        # 1. Создать задачу на формирование отчёта (используем _fetch_with_simple_retry)
+        params = {"dateFrom": date_from, "dateTo": date_to}
+        status, data = await _fetch_with_simple_retry(session, base_url, headers, params, "Paid Storage Create")
 
-        if status != 200:
-            logger.error(
-                f"Не удалось создать задачу на отчёт платного хранения: {status} — {data}")
-            return []
+        if status != 200 or not isinstance(data, dict):
+            logger.error(f"Failed to create paid storage report task: {status} - {data}")
+            return None
 
         task_id = data.get("data", {}).get("taskId")
         if not task_id:
-            logger.error("Ответ на создание задачи не содержит taskId")
-            return []
-
-        logger.info(f"Создана задача на отчёт платного хранения: {task_id}")
+            logger.error("No taskId in paid storage creation response.")
+            return None
+        logger.info(f"Paid storage report task created: {task_id}")
 
         # 2. Ожидание завершения задачи
+        status_url = f"{base_url}/tasks/{task_id}/status"
+        max_wait_time = 300  # 5 минут
+        check_interval = 5  # секунд
         wait_time = 0
-        while wait_time < PAID_STORAGE_MAX_WAIT_TIME:
-            status_url = f"{PAID_STORAGE_BASE_URL}/tasks/{task_id}/status"
+
+        while wait_time < max_wait_time:
+            await asyncio.sleep(check_interval)
+            wait_time += check_interval
+
             try:
                 async with session.get(status_url, headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         status_data = await resp.json()
                         task_status = status_data.get("data", {}).get("status")
+                        logger.info(f"Paid storage task {task_id} status: {task_status}")
                         if task_status == "done":
-                            logger.info("Отчёт о платном хранении готов.")
-                            break
-                        elif task_status == "error":
-                            logger.error(
-                                f"Ошибка при генерации отчёта платного хранения: {status_data}")
-                            return []
+                            break  # Выходим из цикла, отчет готов
+                        elif task_status in ["error", "canceled", "purged"]:
+                            logger.error(f"Paid storage task failed with status: {task_status}")
+                            return None
                     else:
-                        logger.warning(
-                            f"Неожиданный статус при проверке задачи: {resp.status}")
+                        logger.warning(f"Unexpected status while checking task: {resp.status}")
             except Exception as e:
-                logger.error(
-                    f"Ошибка при проверке статуса задачи платного хранения: {e}")
+                logger.error(f"Error checking paid storage task status: {e}")
 
-            await asyncio.sleep(PAID_STORAGE_STATUS_CHECK_INTERVAL)
-            wait_time += PAID_STORAGE_STATUS_CHECK_INTERVAL
-        else:
-            logger.error(
-                "Превышено время ожидания готовности отчёта о платном хранении")
-            return []
+        else:  # Сработает, если цикл завершился без break
+            logger.error("Timeout waiting for paid storage report.")
+            return None
 
         # 3. Скачать отчёт
-        download_url = f"{PAID_STORAGE_BASE_URL}/tasks/{task_id}/download"
+        download_url = f"{base_url}/tasks/{task_id}/download"
         try:
-            async with session.get(download_url, headers=headers, timeout=30) as resp:
+            async with session.get(download_url, headers=headers, timeout=60) as resp:
                 if resp.status == 200:
                     report_data = await resp.json()
-                    # Фильтрация по полю "date" (формат: "YYYY-MM-DD")
-                    filtered = []
-                    for record in report_data:
-                        record_date_str = record.get("date")
-                        if not record_date_str:
-                            continue
-                        try:
-                            record_date = datetime.fromisoformat(
-                                record_date_str)
-                            if start_dt.date() <= record_date.date() <= end_dt.date():
-                                filtered.append(record)
-                        except ValueError:
-                            logger.warning(
-                                f"Некорректная дата в записи платного хранения: {record_date_str}")
-                    return filtered
+                    logger.info(f"--- [SUCCESS] Paid storage report downloaded. Records: {len(report_data)} ---")
+                    return report_data
                 else:
-                    logger.error(f"Ошибка при скачивании отчёта платного хранения: {resp.status} — {await resp.text()}")
-                    return []
+                    logger.error(f"Failed to download paid storage report: {resp.status} - {await resp.text()}")
+                    return None
         except Exception as e:
-            logger.error(
-                f"Исключение при скачивании отчёта платного хранения: {e}")
-            return []
+            logger.error(f"Exception during paid storage report download: {e}")
+            return None
 
 
 # ========================================

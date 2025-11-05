@@ -107,7 +107,7 @@ def _apply_data_formatting(worksheet: gspread.Worksheet, last_row: int):
         worksheet.format(r, {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
 
 
-async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_report_data: list, orders_data: list, ad_costs: dict):
+async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_report_data: list, orders_data: list, ad_costs: dict, storage_costs: dict):
     """
     Агрегирует данные и заполняет лист "Юнит экономика".
     """
@@ -163,6 +163,8 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             p = products[key]
             # Получаем расходы на рекламу из агрегированного словаря
             advertising_cost = ad_costs.get(key, 0.0)
+            # Получаем расходы на хранение
+            storage_cost = storage_costs.get(key, 0.0)
 
             # Рассчитываем ДРР (% от продаж)
             drr_percent = (advertising_cost / p["sales_rub"]) if p["sales_rub"] > 0 else 0
@@ -177,7 +179,7 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
                 p["returns_rub"],
                 p["orders_pcs"], p["sales_pcs"], p["returns_pcs"],
                 buyout_percent,
-                p["storage_rub"], 0,  # Хранение %
+                storage_cost, 0, # Хранение руб (из нового API), Хранение %
                 p["commission_rub"], 0,  # Комиссия %
                 p["logistics_forward_rub"], p["logistics_reverse_rub"],
                 0, 0,  # % логистики, Логистика на ед

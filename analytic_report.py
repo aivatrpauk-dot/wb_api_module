@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 import asyncio
 import database as db
-from wb_api import get_wb_orders, get_wb_weekly_report
+from wb_api import get_wb_orders, get_wb_weekly_report, get_wb_paid_storage_report
 from unit_economics_report import create_unit_economics_sheet, fill_unit_economics_sheet
 from wb_advert import get_aggregated_ad_costs
 
@@ -790,34 +790,52 @@ async def fill_pnl_report(
         date_from_str = start_date.strftime("%Y-%m-%d")
         date_to_str = end_date.strftime("%Y-%m-%d")
 
-        logger.info("Запрашиваю данные от WB API (единый запрос для отчетов + заказы)...")
+        logger.info("Запрашиваю данные от WB API (единый запрос для отчетов + заказы, реклама, хранение)...")
 
+        # 1. Формируем все задачи для параллельного выполнения
         report_data_task = get_wb_weekly_report(api_key, date_from_str, date_to_str, period="daily")
         orders_task = get_wb_orders(api_key, date_from_str, date_to_str)
+        storage_report_task = get_wb_paid_storage_report(api_key, date_from_str, date_to_str)
 
-        report_data, orders_data = await asyncio.gather(report_data_task, orders_task)
+        # 2. Выполняем все задачи одновременно
+        # Используем корректные имена переменных: report_data, orders_data, storage_data
+        report_data, orders_data, storage_data = await asyncio.gather(
+            report_data_task, orders_task, storage_report_task
+        )
 
-        # Дополнительно запрашиваем расходы на рекламу
-        # Шаг 1: Собираем уникальные nmId из данных заказов (это самый надежный источник)
-        target_nm_ids = {order['nmId'] for order in orders_data if 'nmId' in order}
-        logger.info(f"Found {len(target_nm_ids)} unique nmIds in the report period for ad cost fetching.")
-
-        # Запрашиваем расходы на рекламу только для этих артикулов
+        # 3. Получаем расходы на рекламу (этот вызов последовательный, так как ему нужны nmId из orders_data)
+        target_nm_ids = {order['nmId'] for order in (orders_data or []) if 'nmId' in order}
+        logger.info(f"Найдено {len(target_nm_ids)} уникальных nmId для запроса расходов на рекламу.")
         ad_costs = await get_aggregated_ad_costs(api_key, start_date, end_date, target_nm_ids)
 
-        # Проверяем на критическую ошибку API (None), пустой список [] - это валидный ответ
+        # 4. Агрегируем расходы на хранение
+        logger.info("Агрегирую данные по платному хранению...")
+        storage_costs = defaultdict(float)
+        if storage_data:  # storage_data может быть None в случае ошибки API
+            for row in storage_data:
+                date_str = row.get("date")
+                nm_id = row.get("nmId")
+                cost = row.get("warehousePrice", 0)
+                if date_str and nm_id:
+                    key = (date_str, nm_id)
+                    storage_costs[key] += cost
+        logger.info(f"Данные по хранению агрегированы для {len(storage_costs)} пар (дата, nmId).")
+
+        # 5. Проверяем на критическую ошибку API
         if report_data is None or orders_data is None:
-            logger.error("Критическая ошибка API: не удалось получить данные. Прерывание.")
+            logger.error("Критическая ошибка API: не удалось получить основные данные (детализация или заказы).")
             raise Exception("API data fetch failed")
 
-        # === 3. Создание и заполнение листов БЕЗ ЛИШНИХ УСЛОВИЙ ===
+        # === 3. Создание и заполнение листов ===
         logger.info("Заполняю листы отчетов...")
 
-        # Эти функции должны вызываться ВСЕГДА. Они умеют обрабатывать пустые списки данных.
+        # Используем `report_data` и `orders_data` для "старых" отчетов
         await fill_pnl_weekly_sheet(spreadsheet, report_data, orders_data, start_date, end_date)
         await fill_product_analytics_weekly_sheet(spreadsheet, report_data, orders_data)
+
+        # Создаем и заполняем "Юнит экономику", передавая ВСЕ собранные данные
         await create_unit_economics_sheet(spreadsheet)
-        await fill_unit_economics_sheet(spreadsheet, report_data, orders_data, ad_costs)
+        await fill_unit_economics_sheet(spreadsheet, report_data, orders_data, ad_costs, storage_costs)
 
         # Удаляем стандартный лист, созданный по умолчанию
         spreadsheet.del_worksheet(default_sheet)
@@ -905,6 +923,7 @@ async def generate_daily_unit_economics_report(user_id: int, start_date: datetim
 
     # 4. Наполнение данными
     await fill_unit_economics_sheet(spreadsheet, daily_report_data, orders_data)
+
 
     spreadsheet.del_worksheet(default_sheet)
 
