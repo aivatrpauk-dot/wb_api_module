@@ -786,16 +786,12 @@ async def fill_pnl_report(
         logger.info(f"Создана таблица: {spreadsheet.url}")
         default_sheet = spreadsheet.get_worksheet(0)
 
-        # === 2. ОПТИМИЗИРОВАННОЕ получение данных от WB API ===
-        date_from_str = start_date.strftime("%Y-%m-%d")
-        date_to_str = end_date.strftime("%Y-%m-%d")
-
         logger.info("Запрашиваю данные от WB API (единый запрос для отчетов + заказы, реклама, хранение)...")
 
         # 1. Формируем все задачи для параллельного выполнения
-        report_data_task = get_wb_weekly_report(api_key, date_from_str, date_to_str, period="daily")
-        orders_task = get_wb_orders(api_key, date_from_str, date_to_str)
-        storage_report_task = get_wb_paid_storage_report(api_key, date_from_str, date_to_str)
+        report_data_task = get_wb_weekly_report(api_key, start_date, end_date, period="daily")
+        orders_task = get_wb_orders(api_key, start_date, end_date)
+        storage_report_task = get_wb_paid_storage_report(api_key, start_date, end_date)
 
         # 2. Выполняем все задачи одновременно
         # Используем корректные имена переменных: report_data, orders_data, storage_data

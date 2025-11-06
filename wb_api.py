@@ -1,8 +1,9 @@
 import asyncio
 from typing import List
-from datetime import datetime
+from datetime import datetime, timedelta
 import aiohttp
 import logging
+import pytz
 
 from typing import List, Dict, Any
 
@@ -23,33 +24,50 @@ PAID_STORAGE_MAX_WAIT_TIME = 300  # 5 минут
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ========================================
 
-def _is_within_date_range(record: dict, start_dt: datetime, end_dt: datetime) -> bool:
-    """Проверяет, находится ли lastChangeDate записи в заданном диапазоне."""
-    last_change_str = record.get("date")
-    # last_change_str = record.get("lastChangeDate")
-    if not last_change_str:
+def _is_within_date_range(record: dict, start_dt_utc: datetime, end_dt_utc: datetime) -> bool:
+    """
+    Проверяет, находится ли дата записи в заданном UTC диапазоне.
+    Корректно обрабатывает naive datetime, предполагая, что они в московском времени.
+    """
+    # Для заказов и продаж используем lastChangeDate как основной источник времени
+    date_str = record.get("lastChangeDate") or record.get("date")
+    if not date_str:
         return False
+
     try:
-        last_change_dt = datetime.fromisoformat(
-            last_change_str.replace("Z", "+00:00"))
-        # and record.get("isCancel", False) == False
-        return start_dt <= last_change_dt <= end_dt
-    except ValueError:
-        logger.warning(f"Некорректный формат даты в записи: {last_change_str}")
+        # Пытаемся распарсить как aware datetime
+        if 'Z' in date_str or '+' in date_str.split('T')[1]:
+            dt_aware = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        else:
+            # Если дата naive (нет Z или смещения), считаем, что это Москва
+            tz_moscow = pytz.timezone('Europe/Moscow')
+            dt_naive = datetime.fromisoformat(date_str)
+            dt_aware = tz_moscow.localize(dt_naive)
+
+        # Конвертируем в UTC для сравнения
+        dt_utc = dt_aware.astimezone(pytz.utc)
+
+        return start_dt_utc <= dt_utc <= end_dt_utc
+
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Некорректный формат даты в записи: '{date_str}'. Ошибка: {e}")
         return False
 
 
+# --- wb_api.py ---
+
+# ЗАМЕНИТЬ ЭТУ ФУНКЦИЮ
 async def _fetch_with_simple_retry(
-    session: aiohttp.ClientSession,
-    url: str,
-    headers: dict,
-    params: dict,
-    method_name: str,
-) -> tuple[int, list | str]:
-    """Выполняет запрос с простым повтором при 429 ошибке."""
+        session: aiohttp.ClientSession,
+        url: str,
+        headers: dict,
+        params: dict,
+        method_name: str,
+) -> tuple[int, list | dict | str | None]:  # <-- Обновляем типы
+    """Выполняет запрос с простым повтором при 429 ошибке и улучшенным логированием."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.get(url, headers=headers, params=params, timeout=20) as resp:
+            async with session.get(url, headers=headers, params=params, timeout=120) as resp:  # Увеличиваем таймаут
                 if resp.status == 200:
                     return 200, await resp.json()
                 elif resp.status == 429:
@@ -61,113 +79,149 @@ async def _fetch_with_simple_retry(
                     else:
                         return 429, await resp.text()
                 else:
-                    return resp.status, await resp.text()
+                    # Логируем другие ошибки API
+                    error_text = await resp.text()
+                    logger.error(
+                        f"{method_name}: API Error (попытка {attempt}/{MAX_RETRIES}) - Status: {resp.status}, Body: {error_text[:500]}")
+                    # Для 4xx ошибок (кроме 429) нет смысла повторять
+                    if 400 <= resp.status < 500:
+                        return resp.status, error_text
+                    # Для 5xx ошибок повторяем
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY / 2)
+                        continue
+                    else:
+                        return resp.status, error_text
+
         except Exception as e:
-            logger.error(f"{method_name}: исключение (попытка {attempt}): {e}")
+            # --- УЛУЧШЕННОЕ ЛОГИРОВАНИЕ ИСКЛЮЧЕНИЙ ---
+            logger.error(
+                f"{method_name}: Exception (попытка {attempt}/{MAX_RETRIES}): {type(e).__name__} - {e}",
+                exc_info=True  # Добавляем полный трейсбек в лог
+            )
             if attempt < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
+                await asyncio.sleep(RETRY_DELAY / 2)
                 continue
             else:
-                raise
-    raise RuntimeError("Недостижимо")
+                # Если все попытки провалены, возвращаем None, чтобы вызывающая функция могла это обработать
+                return None, None
 
+    return None, None  # Если цикл завершился (не должно происходить)
 
 # ========================================
 # ЕЖЕДНЕВНЫЕ ОТЧЁТЫ
 # ========================================
 
-async def get_wb_orders(api_key: str, date_from: str, date_to: str) -> List[dict]:
+async def get_wb_orders(
+        api_key: str,
+        start_date: datetime,  # <-- Тип изменен
+        end_date: datetime  # <-- Тип изменен
+) -> List[dict] | None:
     """
     Получает список заказов через /api/v1/supplier/orders
     Args:
         api_key (str): API-ключ продавца.
-        date_from (str): Дата начала периода в формате "YYYY-MM-DD".
-        date_to (str): Дата окончания периода в формате "YYYY-MM-DD".
+        start_date (datetime): Дата начала периода.
+        end_date (datetime): Дата окончания периода.
 
     Returns:
         list[dict]: Список заказов. Основные поля:
 
-        📅 **Даты и статусы**
-            - `date` — дата и время заказа (МСК, UTC+3)
-            - `lastChangeDate` — дата и время последнего обновления (МСК, UTC+3)
-            - `isCancel` — признак отмены заказа
-            - `cancelDate` — дата отмены (если применимо)
+        📅 Даты и статусы
+            - date — дата и время заказа (МСК, UTC+3)
+            - lastChangeDate — дата и время последнего обновления (МСК, UTC+3)
+            - isCancel — признак отмены заказа
+            - cancelDate — дата отмены (если применимо)
 
-        📍 **География и склад**
-            - `warehouseName` — название склада отгрузки
-            - `warehouseType` — тип склада ("Склад WB"/"Склад продавца")
-            - `countryName` — страна доставки
-            - `oblastOkrugName` — федеральный округ
-            - `regionName` — регион доставки
+        📍 География и склад
+            - warehouseName — название склада отгрузки
+            - warehouseType — тип склада ("Склад WB"/"Склад продавца")
+            - countryName — страна доставки
+            - oblastOkrugName — федеральный округ
+            - regionName — регион доставки
 
-        🏷 **Товар и артикулы**
-            - `nmId` — артикул Wildberries
-            - `supplierArticle` — артикул продавца
-            - `barcode` — штрихкод товара
-            - `brand` — бренд
-            - `category` — категория товара
-            - `subject` — предметная группа
-            - `techSize` — размер товара
+        🏷 Товар и артикулы
+            - nmId — артикул Wildberries
+            - supplierArticle — артикул продавца
+            - barcode — штрихкод товара
+            - brand — бренд
+            - category — категория товара
+            - subject — предметная группа
+            - techSize — размер товара
+        💰 Цены и скидки
+            - totalPrice — исходная цена (без скидок)
+            - discountPercent — процент скидки продавца
+            - priceWithDisc — цена с учётом скидки продавца
+            - spp — размер скидки Wildberries
+            - finishedPrice — итоговая цена (со всеми скидками кроме WB Кошелька)
 
-        💰 **Цены и скидки**
-            - `totalPrice` — исходная цена (без скидок)
-            - `discountPercent` — процент скидки продавца
-            - `priceWithDisc` — цена с учётом скидки продавца
-            - `spp` — размер скидки Wildberries
-            - `finishedPrice` — итоговая цена (со всеми скидками кроме WB Кошелька)
-
-        📦 **Логистика и идентификаторы**
-            - `incomeID` — номер поставки
-            - `sticker` — идентификатор стикера
-            - `gNumber` — идентификатор корзины заказа
-            - `srid` — уникальный идентификатор заказа
-            - `isSupply` — признак договора поставки
-            - `isRealization` — признак договора реализации
+        📦 Логистика и идентификаторы
+            - incomeID — номер поставки
+            - sticker — идентификатор стикера
+            - gNumber — идентификатор корзины заказа
+            - srid — уникальный идентификатор заказа
+            - isSupply — признак договора поставки
+            - isRealization — признак договора реализации
     """
-
     url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
     headers = {"Authorization": api_key}
     all_orders = []
 
-    start_dt = datetime.fromisoformat(f"{date_from}T00:00:00")
-    end_dt = datetime.fromisoformat(f"{date_to}T23:59:59")
-    current_date_from = f"{date_from}T00:00:00"
+    # --- ИЗМЕНЕНИЕ: Используем переданные datetime объекты ---
+    # Устанавливаем часовой пояс Москвы
+    tz_moscow = pytz.timezone('Europe/Moscow')
+    # Убеждаемся, что start_date и end_date имеют информацию о часовом поясе
+    start_dt_moscow = start_date if start_date.tzinfo else tz_moscow.localize(start_date)
+    end_dt_moscow = end_date if end_date.tzinfo else tz_moscow.localize(end_date)
+
+    # Конвертируем границы в UTC для корректных сравнений внутри _is_within_date_range
+    start_dt_utc = start_dt_moscow.astimezone(pytz.utc)
+    end_dt_utc = end_dt_moscow.astimezone(pytz.utc)
+
+    # Для API WB используем строку в формате ISO для Москвы
+    current_date_from = start_dt_moscow.isoformat()
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
     async with aiohttp.ClientSession() as session:
         while True:
             params = {"dateFrom": current_date_from, "flag": 0}
 
+            # Используем наш стандартный retry-хелпер
             status, data_or_text = await _fetch_with_simple_retry(
                 session, url, headers, params, "Orders API"
             )
 
-            if status == 200:
+            if status == 200 and isinstance(data_or_text, list):
                 data = data_or_text
                 if not data:
-                    break
+                    break  # Данные закончились
                 all_orders.extend(data)
 
-                last_change_date = data[-1].get("lastChangeDate")
-                if not last_change_date:
-                    logger.warning(
-                        "Отсутствует lastChangeDate в последней записи. Прерывание.")
+                last_change_date_str = data[-1].get("lastChangeDate")
+                if not last_change_date_str:
+                    logger.warning("Отсутствует lastChangeDate в последней записи. Прерывание пагинации.")
                     break
-                current_date_from = last_change_date
+
+                current_date_from = last_change_date_str
 
                 # Проверка выхода за верхнюю границу
                 try:
-                    last_dt = datetime.fromisoformat(
-                        last_change_date.replace("Z", "+00:00"))
-                    if last_dt > end_dt:
-                        break
+                    # Приводим дату ответа к aware datetime и конвертируем в UTC для сравнения
+                    last_dt_aware = datetime.fromisoformat(last_change_date_str.replace("Z", "+00:00"))
+                    last_dt_utc = last_dt_aware.astimezone(pytz.utc)
+
+                    if last_dt_utc > end_dt_utc:
+                        break  # Вышли за пределы периода
                 except ValueError:
-                    pass  # игнорируем, если не распарсилось
+                    logger.warning(f"Не удалось распарсить lastChangeDate для сравнения: {last_change_date_str}")
+                    pass
 
             else:
                 logger.error(f"Orders API ошибка: {status} — {data_or_text}")
-                break
+                return None  # Возвращаем None в случае критической ошибки
 
-    return [r for r in all_orders if _is_within_date_range(r, start_dt, end_dt)]
+    # Финальная фильтрация также происходит в UTC
+    return [r for r in all_orders if _is_within_date_range(r, start_dt_utc, end_dt_utc)]
 
 
 ### НЕ ИСПОЛЬЗОВАЛАСЬ ###
@@ -388,11 +442,11 @@ async def get_wb_acceptance_report(
 
 async def get_wb_paid_storage_report(
     api_key: str,
-    date_from: str,
-    date_to: str,
+    start_date: datetime,
+    end_date: datetime
 ) -> List[Dict[str, Any]] | None:
     """
-    Получает отчёт о платном хранении через API (создание задачи → ожидание → загрузка)
+    Получает отчёт о платном хранении с пагинацией по дате (чанками по 8 дней).
     Args:
         api_key (str): API-ключ продавца.
         date_from (str): Дата начала периода в формате "YYYY-MM-DD".
@@ -434,69 +488,74 @@ async def get_wb_paid_storage_report(
             - `loyaltyDiscount` — скидка программы лояльности (рубли)
     """
 
-    logger.info("--- [START] Fetching paid storage report ---")
+    logger.info("--- [START] Fetching paid storage report with date pagination ---")
+    all_report_data = []
+
+    current_start = start_date
+    while current_start <= end_date:
+        # Определяем конец чанка - 7 дней вперед (8 дней включительно)
+        chunk_end = min(end_date, current_start + timedelta(days=7))
+        date_from_str = current_start.strftime("%Y-%m-%d")
+        date_to_str = chunk_end.strftime("%Y-%m-%d")
+
+        logger.info(f"Fetching paid storage for period {date_from_str} to {date_to_str}...")
+
+        # Выполняем один цикл получения отчета для чанка
+        report_chunk = await _get_single_paid_storage_chunk(api_key, date_from_str, date_to_str)
+
+        if report_chunk is None:
+            logger.error(f"Failed to fetch paid storage chunk for {date_from_str}-{date_to_str}. Aborting.")
+            return None  # Критическая ошибка в одном из чанков - прерываем все
+
+        all_report_data.extend(report_chunk)
+
+        # Переходим к следующему чанку и делаем паузу
+        current_start = chunk_end + timedelta(days=1)
+        if current_start <= end_date:
+            logger.info("Waiting 61 seconds before next paid storage request due to API limits...")
+            await asyncio.sleep(61)
+
+    logger.info(f"--- [SUCCESS] Paid storage report fully downloaded. Total records: {len(all_report_data)} ---")
+    return all_report_data
+
+
+# ДОБАВИТЬ НОВУЮ ВСПОМОГАТЕЛЬНУЮ ФУНКЦИЮ (можно после get_wb_paid_storage_report)
+async def _get_single_paid_storage_chunk(api_key: str, date_from: str, date_to: str) -> List[Dict[str, Any]] | None:
+    """Внутренняя функция для получения одного чанка отчета по хранению."""
+    # Код из старой get_wb_paid_storage_report, адаптированный
     headers = {"Authorization": api_key}
     base_url = "https://seller-analytics-api.wildberries.ru/api/v1/paid_storage"
-
     async with aiohttp.ClientSession() as session:
-        # 1. Создать задачу на формирование отчёта (используем _fetch_with_simple_retry)
         params = {"dateFrom": date_from, "dateTo": date_to}
         status, data = await _fetch_with_simple_retry(session, base_url, headers, params, "Paid Storage Create")
-
         if status != 200 or not isinstance(data, dict):
-            logger.error(f"Failed to create paid storage report task: {status} - {data}")
+            logger.error(f"Failed to create task for {date_from}-{date_to}: {status} - {data}")
             return None
-
         task_id = data.get("data", {}).get("taskId")
-        if not task_id:
-            logger.error("No taskId in paid storage creation response.")
-            return None
-        logger.info(f"Paid storage report task created: {task_id}")
+        if not task_id: return None
 
-        # 2. Ожидание завершения задачи
         status_url = f"{base_url}/tasks/{task_id}/status"
-        max_wait_time = 300  # 5 минут
-        check_interval = 5  # секунд
-        wait_time = 0
-
+        max_wait_time, check_interval, wait_time = 300, 5, 0
         while wait_time < max_wait_time:
             await asyncio.sleep(check_interval)
             wait_time += check_interval
-
             try:
                 async with session.get(status_url, headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         status_data = await resp.json()
                         task_status = status_data.get("data", {}).get("status")
-                        logger.info(f"Paid storage task {task_id} status: {task_status}")
                         if task_status == "done":
-                            break  # Выходим из цикла, отчет готов
+                            download_url = f"{base_url}/tasks/{task_id}/download"
+                            async with session.get(download_url, headers=headers, timeout=60) as dl_resp:
+                                if dl_resp.status == 200:
+                                    return await dl_resp.json()
+                                else:
+                                    return None
                         elif task_status in ["error", "canceled", "purged"]:
-                            logger.error(f"Paid storage task failed with status: {task_status}")
                             return None
-                    else:
-                        logger.warning(f"Unexpected status while checking task: {resp.status}")
-            except Exception as e:
-                logger.error(f"Error checking paid storage task status: {e}")
-
-        else:  # Сработает, если цикл завершился без break
-            logger.error("Timeout waiting for paid storage report.")
-            return None
-
-        # 3. Скачать отчёт
-        download_url = f"{base_url}/tasks/{task_id}/download"
-        try:
-            async with session.get(download_url, headers=headers, timeout=60) as resp:
-                if resp.status == 200:
-                    report_data = await resp.json()
-                    logger.info(f"--- [SUCCESS] Paid storage report downloaded. Records: {len(report_data)} ---")
-                    return report_data
-                else:
-                    logger.error(f"Failed to download paid storage report: {resp.status} - {await resp.text()}")
-                    return None
-        except Exception as e:
-            logger.error(f"Exception during paid storage report download: {e}")
-            return None
+            except Exception:
+                pass
+        return None  # Timeout
 
 
 # ========================================
@@ -549,48 +608,74 @@ async def get_wb_weekly_report(api_key: str, date_from: str, date_to: str, perio
             - `is_legal_entity` — признак B2B-продажи
     """
 
+
+async def get_wb_weekly_report(
+        api_key: str,
+        start_date: datetime,  # <-- Меняем тип на datetime
+        end_date: datetime,  # <-- Меняем тип на datetime
+        period: str = "weekly"
+) -> list | None:
+    """
+    Получает детализированный отчёт с пагинацией по дате (чанками по 30 дней)
+    для надежной работы с большими периодами.
+    """
+    logger.info(f"--- [START] Fetching '{period}' report with date pagination ---")
+    all_report_data = []
+
+    current_start = start_date
+    while current_start <= end_date:
+        chunk_end = min(end_date, current_start + timedelta(days=6))
+        date_from_str = current_start.strftime("%Y-%m-%d")
+        date_to_str = chunk_end.strftime("%Y-%m-%d")
+
+        logger.info(f"Fetching '{period}' report for period {date_from_str} to {date_to_str}...")
+
+        # Выполняем один цикл получения отчета для чанка
+        report_chunk = await _get_single_report_detail_chunk(api_key, date_from_str, date_to_str, period)
+
+        if report_chunk is None:
+            logger.error(f"Failed to fetch '{period}' report chunk for {date_from_str}-{date_to_str}. Aborting.")
+            return None
+
+        all_report_data.extend(report_chunk)
+
+        current_start = chunk_end + timedelta(days=1)
+        # Для этого API пауза между чанками не нужна, т.к. внутренняя пагинация уже делает паузы
+
+    logger.info(f"--- [SUCCESS] '{period}' report fully downloaded. Total records: {len(all_report_data)} ---")
+    return all_report_data
+
+
+
+async def _get_single_report_detail_chunk(api_key: str, date_from: str, date_to: str, period: str) -> list | None:
+    """Внутренняя функция для получения одного чанка отчета детализации с пагинацией по rrdid."""
     url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
-    headers = {
-        "Authorization": api_key,
-        "Content-Type": "application/json"
-    }
-
-    all_data = []
-    rrdid = 0
-
+    headers = {"Authorization": api_key}
+    all_data, rrdid = [], 0
     async with aiohttp.ClientSession() as session:
         while True:
-            params = {
-                "dateFrom": date_from,
-                "dateTo": date_to,
-                "limit": 100000,
-                "rrdid": rrdid,
-                "period": period
-            }
-            try:
-                async with session.get(url, headers=headers, params=params, timeout=60) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if not data:
-                            logger.info(f"Получение {period}-отчёта завершено. Всего записей: {len(all_data)}")
-                            break
+            params = {"dateFrom": date_from, "dateTo": date_to, "limit": 100000, "rrdid": rrdid, "period": period}
 
-                        all_data.extend(data)
-                        rrdid = data[-1].get("rrd_id")
-                        if not rrdid:
-                            logger.warning("rrd_id не найден, прерывание пагинации.")
-                            break
+            # --- УЛУЧШЕННАЯ ОБРАБОТКА РЕЗУЛЬТАТА ---
+            status, data_or_text = await _fetch_with_simple_retry(session, url, headers, params,
+                                                                  f"Report Detail '{period}'")
 
-                        logger.info(
-                            f"Получена страница {period}-отчёта. Записей: {len(data)}. Следующий rrdid: {rrdid}")
-                    else:
-                        logger.error(f"Ошибка API ({period}-отчёт): {resp.status} — {await resp.text()}")
-                        return None  # Возвращаем None в случае ошибки
-            except Exception as e:
-                logger.error(f"Ошибка при запросе {period}-отчёта: {e}")
-                return None  # Возвращаем None в случае ошибки
+            # Явно проверяем на None, что означает полный провал после всех ретраев
+            if status is None:
+                logger.error(f"Не удалось получить данные для отчета '{period}' после всех попыток.")
+                return None  # Критическая ошибка, прерываем получение чанка
+
+            if status == 200 and isinstance(data_or_text, list):
+                data = data_or_text
+                if not data: break
+                all_data.extend(data)
+                if not (rrd_id := data[-1].get("rrd_id")): break
+                rrdid = rrd_id
+                await asyncio.sleep(1)
+            else:
+                logger.error(f"Не удалось получить страницу rrdid для отчета '{period}': статус {status}")
+                return None
     return all_data
-
 
 # ========================================
 # ОСТАЛЬНЫЕ ФУНКЦИИ
