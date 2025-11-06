@@ -165,7 +165,7 @@ async def get_wb_orders(
                 # Продолжаем, чтобы не прерывать сбор за другие дни
 
             current_day += timedelta(days=1)
-            await asyncio.sleep(1)  # Пауза, чтобы не превышать лимиты
+            await asyncio.sleep(61)  # Пауза, чтобы не превышать лимиты
 
     return all_orders
 

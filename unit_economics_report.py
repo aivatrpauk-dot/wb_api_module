@@ -177,7 +177,7 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             elif "возврат" in doc_type:
                 products[key]["returns_rub"] += row.get("retail_amount", 0)
                 products[key]["returns_pcs"] += row.get("quantity", 0)
-            products[key]["commission_rub"] += row.get("ppvz_vw", 0)
+            products[key]["commission_rub"] += row.get("ppvz_vw", 0) + row.get("ppvz_vw_nds", 0)
             products[key]["logistics_forward_rub"] += row.get("delivery_rub", 0) - row.get("rebill_logistic_cost", 0)
             products[key]["logistics_reverse_rub"] += row.get("rebill_logistic_cost", 0)
             products[key]["acceptance_rub"] += row.get("acceptance", 0)

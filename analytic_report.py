@@ -167,161 +167,126 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
     """
 
     try:
+        # 1. Создание листа (если его еще нет)
         try:
-            # Пытаемся получить лист по имени, если он уже есть
             ws = spreadsheet.worksheet("P&L недельный")
         except gspread.WorksheetNotFound:
-            # Если листа нет - создаем новый
-            ws = spreadsheet.add_worksheet(
-                title="P&L недельный", rows=500, cols=30)
+            ws = spreadsheet.add_worksheet(title="P&L недельный", rows=500, cols=30)
 
         headers = [
-            "Дата",
-            "Количество заказов",
-            "Заказы",
-            "Выкупили", 
-            "Продажи до СПП",
-            "Себестоймость продаж",
-            "Потери от брака",
-            "Комиссия",
-            "Возвраты",
-            "Реклама",
-            "Прямая логистика",
-            "Обратная логистика", 
-            "Хранение",
-            "Приемка",
-            "Корректировки",
-            "Штрафы",
-            "Итого к оплате",
-            "Опер затраты",
-            "Ebitda/%",
-            "",
-            "Налоги", 
-            "Кредит",
-            "Чистая прибыль/ROI",
-            ""
+            "Дата", "Количество заказов", "Заказы", "Выкупили", "Продажи до СПП",
+            "Себестоймость продаж", "Потери от брака", "Комиссия", "Возвраты", "Реклама",
+            "Прямая логистика", "Обратная логистика", "Хранение", "Приемка",
+            "Корректировки", "Штрафы", "Итого к оплате", "Опер затраты",
+            "Ebitda/%", "", "Налоги", "Кредит", "Чистая прибыль/ROI", ""
         ]
 
-        # Агрегация по дням
-        daily_aggr = defaultdict(lambda: {
-            "orders_count": 0,
-            "orders": 0,
-            "sales_quantity": 0,
-            "sales_before_spp": 0,
-            "cost": 0,
-            "commission": 0,
-            "returns": 0,
-            "advertising": 0,
-            "forward_logistics": 0,
-            "reverse_logistics": 0,
-            "storage": 0,
-            "acceptance": 0,
-            "adjustments": 0,
-            "penalties": 0,
-            "oper_expenses": 0,
-            "to_pay": 0,
-            "total_to_pay": 0
-        })
+        # 2. ЕДИНАЯ И ПРАВИЛЬНАЯ АГРЕГАЦИЯ
+        daily_aggr = defaultdict(lambda: defaultdict(float))
 
-        for row in daily_data:
-            date_str = row.get("date", "")[:10]
-            if not date_str:
-                continue
+        # Сначала агрегируем заказы по дням
+        for order in daily_data:
+            date_str = order.get("date", "")[:10]
+            if not date_str: continue
             daily_aggr[date_str]["orders_count"] += 1
-            daily_aggr[date_str]["orders"] += row.get("totalPrice", 0) * (1 - row.get("discountPercent", 0) / 100)
+            daily_aggr[date_str]["orders"] += order.get("totalPrice", 0) * (1 - order.get("discountPercent", 0) / 100)
 
+        # Затем агрегируем все финансовые показатели из детализированного отчета
         for row in weekly_data:
+            # ---> КЛЮЧЕВОЙ ФИЛЬТР <---
+            # Учитываем только строки, где есть и дата, и артикул
             date_str = row.get("rr_dt", "")[:10]
-            if not date_str:
+            nm_id = row.get("nm_id")
+            if not date_str or not nm_id:
                 continue
 
-            doc_type = (row.get("doc_type_name") or "").lower()
-            price_with_disc = row.get("retail_price_withdisc_rub", 0)
-            quantity = row.get("quantity", 0)
-
-            is_sale = "продажа" in doc_type
-            is_return = "возврат" in doc_type
-
-            if is_sale:
-                daily_aggr[date_str]["sales_quantity"] += quantity
-                daily_aggr[date_str]["sales_before_spp"] += row.get("retail_amount", 0) * quantity
-                if quantity not in (0, 1):
-                    logger.warning(f"Количество: {quantity}, retail_amount: {row.get('retail_amount', 0)}, price_with_disc: {price_with_disc}, doc_type: {doc_type}")
-            
-            returns = 0
-            if is_return:
-                returns = row.get("retail_amount", 0) * quantity
-                daily_aggr[date_str]["returns"] += returns
-
+            # Суммируем все необходимые метрики по дням
+            daily_aggr[date_str]["commission_rub"] += row.get("ppvz_vw", 0) + row.get("ppvz_vw_nds", 0)
             daily_aggr[date_str]["advertising"] += row.get("deduction", 0)
             daily_aggr[date_str]["forward_logistics"] += row.get("delivery_rub", 0) - row.get("rebill_logistic_cost", 0)
             daily_aggr[date_str]["reverse_logistics"] += row.get("rebill_logistic_cost", 0)
             daily_aggr[date_str]["storage"] += row.get("storage_fee", 0)
             daily_aggr[date_str]["acceptance"] += row.get("acceptance", 0)
             daily_aggr[date_str]["penalties"] += row.get("penalty", 0)
-            daily_aggr[date_str]["to_pay"] += row.get("ppvz_for_pay", 0)
+            daily_aggr[date_str]["adjustments"] += row.get("additional_payment", 0)
+            daily_aggr[date_str]["to_pay"] += row.get("ppvz_for_pay", 0)  # Для расчета "Итого к оплате"
 
-            additional_payment = row.get("additional_payment", 0)
-            installment_cofinancing = row.get("installment_cofinancing_amount", 0)
-            cashback_discount = row.get("cashback_discount", 0)
-            cashback_amount = row.get("cashback_amount", 0)
-            cashback_commission_change = row.get("cashback_commission_change", 0)
-            
-            adjustments = additional_payment + cashback_discount + cashback_amount + cashback_commission_change
-            daily_aggr[date_str]["adjustments"] += adjustments
+            doc_type = (row.get("doc_type_name") or "").lower()
+            quantity = row.get("quantity", 0)
+            if "продажа" in doc_type:
+                daily_aggr[date_str]["sales_quantity"] += quantity
+                daily_aggr[date_str]["sales_before_spp"] += row.get("retail_amount", 0)
+            elif "возврат" in doc_type:
+                daily_aggr[date_str]["returns"] += row.get("retail_amount", 0)
 
-            daily_aggr[date_str]["total_to_pay"] += row.get("ppvz_for_pay", 0) - adjustments - row.get("penalty", 0) - row.get("delivery_rub", 0) \
-                                                 - row.get("storage_fee", 0) - row.get("acceptance", 0) - row.get("deduction", 0) - returns
-
-        # Формируем строки
+        # 3. Формирование строк для вывода в таблицу
         rows = [headers]
-        total_row = [0] * len(headers)
-        total_row[0] = "Факт"
+        total_row = defaultdict(float)  # Используем defaultdict для удобства суммирования
+        total_row['label'] = "Факт"
 
         current = start_date
         while current <= end_date:
             date_str = current.strftime("%Y-%m-%d")
-            day_data = daily_aggr.get(date_str, {})
+            day_data = daily_aggr[date_str]  # Получаем данные за день
+
+            # Рассчитываем "Итого к оплате" для этого дня
+            total_to_pay_day = (day_data["to_pay"] - day_data["adjustments"] - day_data["penalties"] -
+                                (day_data["forward_logistics"] + day_data["reverse_logistics"]) -
+                                day_data["storage"] - day_data["acceptance"] - day_data["advertising"] -
+                                day_data["returns"])
 
             row = [
                 current.strftime("%d.%m.%Y"),
-                day_data.get("orders_count", 0),
-                day_data.get("orders", 0),
-                day_data.get("sales_quantity", 0),
-                day_data.get("sales_before_spp", 0),
-                0,  # Себестоймость продаж
-                0,  # Потери от брака
-                day_data.get("sales_before_spp", 0) - day_data.get("to_pay", 0),
-                day_data.get("returns", 0),
-                day_data.get("advertising", 0),
-                day_data.get("forward_logistics", 0), 
-                day_data.get("reverse_logistics", 0),
-                day_data.get("storage", 0),
-                day_data.get("acceptance", 0),
-                day_data.get("adjustments", 0),
-                day_data.get("penalties", 0),
-                day_data.get("total_to_pay", 0),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0
+                int(day_data["orders_count"]),
+                day_data["orders"],
+                int(day_data["sales_quantity"]),
+                day_data["sales_before_spp"],
+                0, 0,  # Себестоимость, Потери
+                day_data["commission_rub"],  # Выводим как положительный расход
+                day_data["returns"],
+                day_data["advertising"],
+                day_data["forward_logistics"],
+                day_data["reverse_logistics"],
+                day_data["storage"],
+                day_data["acceptance"],
+                day_data["adjustments"],
+                day_data["penalties"],
+                total_to_pay_day,
+                0, 0, 0, 0, 0, 0, 0  # Пустые колонки
             ]
             rows.append(row)
 
-            for i in range(1, len(headers)):
-                total_row[i] += row[i]
+            # Суммируем в итоговую строку
+            for i, header in enumerate(headers):
+                if i > 0 and isinstance(row[i], (int, float)):
+                    total_row[header] += row[i]
 
             current += timedelta(days=1)
 
-        # Вставляем ИТОГО и пустую строку
-        rows.insert(1, total_row)
-        rows.insert(2, ["%"] + [""] * (len(headers)-1))  # Пустая строка после ИТОГО
+        # Преобразуем total_row в список для вывода
+        total_row_list = [total_row.get('label', "Факт")] + [total_row.get(h, 0) for h in headers[1:]]
 
-        # Обновляем данные
-        ws.update("A1", rows)
+        # 4. Вставка итогов и обновление таблицы
+        rows.insert(1, total_row_list)
+        # Рассчитываем процентные соотношения для третьей строки
+        percentage_row = ["%"]
+        # База для расчета - "Продажи до СПП" из итоговой строки
+        sales_before_spp_total = total_row.get("Продажи до СПП", 0)
+
+        for i in range(1, len(headers)):
+            header = headers[i]
+            total_value = total_row.get(header, 0)
+
+            # Не считаем процент для самих продаж и пустых колонок
+            if header == "Продажи до СПП" or header == "" or sales_before_spp_total == 0:
+                percentage_row.append("")
+            else:
+                percentage = total_value / sales_before_spp_total
+                percentage_row.append(percentage)
+
+        rows.insert(2, percentage_row)
+
+        ws.update("A1", rows, value_input_option='USER_ENTERED')
 
         # ========================================
         # ФОРМАТИРОВАНИЕ ЧЕРЕЗ batch_format
@@ -358,41 +323,44 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
             }
         })
 
-        # 13. Строка 3 (процентная): вычисленные значения % (ячейки B3:X3)
-        if len(rows) > 2:
-            sales_before_spp_total = total_row[4]  # Продажи до СПП из строки "Факт"
-            if sales_before_spp_total != 0:
-                # Создаем список вычисленных значений для столбцов B-X (пропуская E)
-                percentage_values = []
-                for i in range(1, len(total_row)):  # от B до X
-                    if i == 4:  # Пропускаем столбец E (Продажи до СПП)
-                        percentage_values.append("")
-                    else:
-                        # Вычисляем процент: значение из строки "Факт" / Продажи до СПП
-                        fact_value = total_row[i]
-                        if sales_before_spp_total != 0:
-                            percentage = fact_value / sales_before_spp_total
-                            percentage_values.append(percentage)
-                        else:
-                            percentage_values.append(0)
-                
-                # Обновляем ячейки вычисленными значениями
-                ws.update("B3:X3", [percentage_values])
-                
-                # Применяем процентный формат
-                format_requests.append({
-                    "range": "B3:X3",
-                    "format": {
-                        "numberFormat": {
-                            "type": "PERCENT", 
-                            "pattern": "0.00%"
-                        }
-                    }
-                })
-
-        # 14. Строка 2 (Факт): формат "Валюта" для числовых столбцов (B2:X2)
         format_requests.append({
-            "range": "B2:X2",
+            "range": "B3:X3",
+            "format": {
+                "numberFormat": {
+                    "type": "PERCENT",
+                    "pattern": "0.00%"
+                }
+            }
+        })
+
+        # 14. Форматирование строки 2 (Факт)
+        # Применяем формат "Число" к "Количество заказов" (B2) и "Выкупили" (D2)
+        format_requests.append({
+            "range": "B2",
+            "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}
+        })
+        format_requests.append({
+            "range": "D2",
+            "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}
+        })
+
+        # Применяем формат "Валюта" к остальным нужным диапазонам
+        # C2 (Заказы) и E2:X2 (Продажи до СПП и далее)
+        format_requests.append({
+            "range": "C2",
+            "format": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}}
+        })
+        format_requests.append({
+            "range": "E2:X2",
+            "format": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}}
+        })
+        # 14.1. Формат "Валюта" для данных по дням (строки с 4-й и ниже)
+        # Нам нужно отформатировать все числовые столбцы
+        # Индекс "Комиссии" = 7. A=0, B=1... H=7
+        commission_col_letter = "H"
+        format_requests.append({
+            # Применяем формат ко всему столбцу, начиная с 4-й строки
+            "range": f"{commission_col_letter}4:X",
             "format": {
                 "numberFormat": {
                     "type": "CURRENCY",
@@ -400,7 +368,6 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
                 }
             }
         })
-
         # 15. Строка 3: нижняя граница темно-серый
         format_requests.append({
             "range": "A3:X3",
@@ -552,7 +519,7 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
                 returns = row.get("retail_amount", 0) * quantity
                 products[nm_id]["returns"] += returns
 
-            products[nm_id]["commission"] += row.get("ppvz_vw", 0)
+            products[nm_id]["commission"] += row.get("ppvz_vw", 0) + row.get("ppvz_vw_nds", 0)
             
             products[nm_id]["advertising"] += row.get("deduction", 0)
             products[nm_id]["forward_logistics"] += row.get("delivery_rub", 0) - row.get("rebill_logistic_cost", 0)
@@ -589,7 +556,7 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
                 p["sales_quantity"],
                 0,
                 0, # % выкупа
-                p["sales_before_spp"] - p["to_pay"], # комиссия
+                p["commission"],
                 p["forward_logistics"],
                 p["reverse_logistics"],
                 p["storage"],
