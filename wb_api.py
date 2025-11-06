@@ -114,114 +114,60 @@ async def _fetch_with_simple_retry(
 
 async def get_wb_orders(
         api_key: str,
-        start_date: datetime,  # <-- Тип изменен
-        end_date: datetime  # <-- Тип изменен
+        start_date: datetime,
+        end_date: datetime
 ) -> List[dict] | None:
     """
-    Получает список заказов через /api/v1/supplier/orders
-    Args:
-        api_key (str): API-ключ продавца.
-        start_date (datetime): Дата начала периода.
-        end_date (datetime): Дата окончания периода.
-
-    Returns:
-        list[dict]: Список заказов. Основные поля:
-
-        📅 Даты и статусы
-            - date — дата и время заказа (МСК, UTC+3)
-            - lastChangeDate — дата и время последнего обновления (МСК, UTC+3)
-            - isCancel — признак отмены заказа
-            - cancelDate — дата отмены (если применимо)
-
-        📍 География и склад
-            - warehouseName — название склада отгрузки
-            - warehouseType — тип склада ("Склад WB"/"Склад продавца")
-            - countryName — страна доставки
-            - oblastOkrugName — федеральный округ
-            - regionName — регион доставки
-
-        🏷 Товар и артикулы
-            - nmId — артикул Wildberries
-            - supplierArticle — артикул продавца
-            - barcode — штрихкод товара
-            - brand — бренд
-            - category — категория товара
-            - subject — предметная группа
-            - techSize — размер товара
-        💰 Цены и скидки
-            - totalPrice — исходная цена (без скидок)
-            - discountPercent — процент скидки продавца
-            - priceWithDisc — цена с учётом скидки продавца
-            - spp — размер скидки Wildberries
-            - finishedPrice — итоговая цена (со всеми скидками кроме WB Кошелька)
-
-        📦 Логистика и идентификаторы
-            - incomeID — номер поставки
-            - sticker — идентификатор стикера
-            - gNumber — идентификатор корзины заказа
-            - srid — уникальный идентификатор заказа
-            - isSupply — признак договора поставки
-            - isRealization — признак договора реализации
+    Получает список заказов через /api/v1/supplier/orders.
+    ВАЖНО: Логика изменена для пагинации и фильтрации строго по полю 'date'.
     """
     url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
     headers = {"Authorization": api_key}
     all_orders = []
 
-    # --- ИЗМЕНЕНИЕ: Используем переданные datetime объекты ---
     # Устанавливаем часовой пояс Москвы
     tz_moscow = pytz.timezone('Europe/Moscow')
-    # Убеждаемся, что start_date и end_date имеют информацию о часовом поясе
     start_dt_moscow = start_date if start_date.tzinfo else tz_moscow.localize(start_date)
     end_dt_moscow = end_date if end_date.tzinfo else tz_moscow.localize(end_date)
 
-    # Конвертируем границы в UTC для корректных сравнений внутри _is_within_date_range
-    start_dt_utc = start_dt_moscow.astimezone(pytz.utc)
-    end_dt_utc = end_dt_moscow.astimezone(pytz.utc)
+    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Пагинация по `date`, а не `lastChangeDate` ---
+    # Мы не можем использовать стандартную пагинацию, т.к. API ее не поддерживает по 'date'.
+    # Поэтому мы будем запрашивать данные по дням. Это надежнее.
 
-    # Для API WB используем строку в формате ISO для Москвы
-    current_date_from = start_dt_moscow.isoformat()
-    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+    current_day = start_dt_moscow.date()
+    end_day = end_dt_moscow.date()
 
     async with aiohttp.ClientSession() as session:
-        while True:
-            params = {"dateFrom": current_date_from, "flag": 0}
+        while current_day <= end_day:
+            date_str = current_day.strftime("%Y-%m-%d")
+            params = {"dateFrom": date_str, "flag": 1}  # flag=1 - данные за указанную дату
 
-            # Используем наш стандартный retry-хелпер
             status, data_or_text = await _fetch_with_simple_retry(
-                session, url, headers, params, "Orders API"
+                session, url, headers, params, "Orders API (by day)"
             )
 
             if status == 200 and isinstance(data_or_text, list):
-                data = data_or_text
-                if not data:
-                    break  # Данные закончились
-                all_orders.extend(data)
-
-                last_change_date_str = data[-1].get("lastChangeDate")
-                if not last_change_date_str:
-                    logger.warning("Отсутствует lastChangeDate в последней записи. Прерывание пагинации.")
-                    break
-
-                current_date_from = last_change_date_str
-
-                # Проверка выхода за верхнюю границу
-                try:
-                    # Приводим дату ответа к aware datetime и конвертируем в UTC для сравнения
-                    last_dt_aware = datetime.fromisoformat(last_change_date_str.replace("Z", "+00:00"))
-                    last_dt_utc = last_dt_aware.astimezone(pytz.utc)
-
-                    if last_dt_utc > end_dt_utc:
-                        break  # Вышли за пределы периода
-                except ValueError:
-                    logger.warning(f"Не удалось распарсить lastChangeDate для сравнения: {last_change_date_str}")
-                    pass
-
+                # Дополнительно фильтруем на нашей стороне, чтобы убедиться
+                for order in data_or_text:
+                    order_date_str = order.get("date")
+                    if not order_date_str: continue
+                    try:
+                        # Приводим дату заказа к aware datetime
+                        order_dt_naive = datetime.fromisoformat(order_date_str)
+                        order_dt_moscow = tz_moscow.localize(order_dt_naive)
+                        # И проверяем, что она точно в нашем диапазоне
+                        if start_dt_moscow <= order_dt_moscow <= end_dt_moscow:
+                            all_orders.append(order)
+                    except (ValueError, TypeError):
+                        continue
             else:
-                logger.error(f"Orders API ошибка: {status} — {data_or_text}")
-                return None  # Возвращаем None в случае критической ошибки
+                logger.error(f"Orders API ошибка для даты {date_str}: {status} — {data_or_text}")
+                # Продолжаем, чтобы не прерывать сбор за другие дни
 
-    # Финальная фильтрация также происходит в UTC
-    return [r for r in all_orders if _is_within_date_range(r, start_dt_utc, end_dt_utc)]
+            current_day += timedelta(days=1)
+            await asyncio.sleep(1)  # Пауза, чтобы не превышать лимиты
+
+    return all_orders
 
 
 ### НЕ ИСПОЛЬЗОВАЛАСЬ ###

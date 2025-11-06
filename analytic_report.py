@@ -754,18 +754,20 @@ async def fill_product_analytics_daily_sheet(spreadsheet, products, acceptance_b
 # ОСНОВНАЯ ФУНКЦИЯ
 # ========================================
 
+# --- analytic_report.py ---
+
 async def fill_pnl_report(
         spreadsheet_id: str,
         shop_id: int,
         start_date: datetime,
         end_date: datetime,
         full_data=None
-) -> str:  # Возвращаем URL (str) или None
+) -> str:
     """
-    Создает ОДНУ Google Таблицу и заполняет ее всеми отчетами,
-    корректно обрабатывая периоды без данных.
+    Создает ОДНУ Google Таблицу и заполняет ее всеми отчетами из единого набора данных,
+    полученного за указанный пользователем период.
     """
-    # Инициализируем spreadsheet здесь, чтобы иметь к ней доступ в блоке except
+    # Инициализируем переменные для доступа в блоке except
     spreadsheet = None
     gc = None
     try:
@@ -786,50 +788,42 @@ async def fill_pnl_report(
         logger.info(f"Создана таблица: {spreadsheet.url}")
         default_sheet = spreadsheet.get_worksheet(0)
 
-        logger.info("Запрашиваю данные от WB API (единый запрос для отчетов + заказы, реклама, хранение)...")
+        # === 2. Единый и оптимизированный запрос данных от WB API ===
+        logger.info("Запрашиваю данные от WB API (детализация, заказы, хранение)...")
 
-        # 1. Формируем все задачи для параллельного выполнения
+        # Делаем ТРИ параллельных запроса за ВЕСЬ выбранный пользователем период
         report_data_task = get_wb_weekly_report(api_key, start_date, end_date, period="daily")
         orders_task = get_wb_orders(api_key, start_date, end_date)
         storage_report_task = get_wb_paid_storage_report(api_key, start_date, end_date)
 
-        # 2. Выполняем все задачи одновременно
-        # Используем корректные имена переменных: report_data, orders_data, storage_data
         report_data, orders_data, storage_data = await asyncio.gather(
             report_data_task, orders_task, storage_report_task
         )
 
-        # 3. Получаем расходы на рекламу (этот вызов последовательный, так как ему нужны nmId из orders_data)
+        # Последующий запрос рекламы, который зависит от orders_data
         target_nm_ids = {order['nmId'] for order in (orders_data or []) if 'nmId' in order}
         logger.info(f"Найдено {len(target_nm_ids)} уникальных nmId для запроса расходов на рекламу.")
         ad_costs = await get_aggregated_ad_costs(api_key, start_date, end_date, target_nm_ids)
 
-        # 4. Агрегируем расходы на хранение
-        logger.info("Агрегирую данные по платному хранению...")
+        # Агрегация данных по хранению
         storage_costs = defaultdict(float)
-        if storage_data:  # storage_data может быть None в случае ошибки API
+        if storage_data:
             for row in storage_data:
-                date_str = row.get("date")
-                nm_id = row.get("nmId")
-                cost = row.get("warehousePrice", 0)
-                if date_str and nm_id:
-                    key = (date_str, nm_id)
-                    storage_costs[key] += cost
-        logger.info(f"Данные по хранению агрегированы для {len(storage_costs)} пар (дата, nmId).")
+                key = (row.get("date"), row.get("nmId"))
+                if all(key):
+                    storage_costs[key] += row.get("warehousePrice", 0)
 
-        # 5. Проверяем на критическую ошибку API
+        # Проверка на критическую ошибку API при получении основных данных
         if report_data is None or orders_data is None:
             logger.error("Критическая ошибка API: не удалось получить основные данные (детализация или заказы).")
             raise Exception("API data fetch failed")
 
-        # === 3. Создание и заполнение листов ===
+        # === 3. Заполнение всех листов из единого набора данных ===
         logger.info("Заполняю листы отчетов...")
 
-        # Используем `report_data` и `orders_data` для "старых" отчетов
+        # Все функции вызываются с едиными данными и датами, которые выбрал пользователь
         await fill_pnl_weekly_sheet(spreadsheet, report_data, orders_data, start_date, end_date)
         await fill_product_analytics_weekly_sheet(spreadsheet, report_data, orders_data)
-
-        # Создаем и заполняем "Юнит экономику", передавая ВСЕ собранные данные
         await create_unit_economics_sheet(spreadsheet)
         await fill_unit_economics_sheet(spreadsheet, report_data, orders_data, ad_costs, storage_costs)
 
