@@ -755,24 +755,34 @@ async def fill_pnl_report(
         logger.info(f"Создана таблица: {spreadsheet.url}")
         default_sheet = spreadsheet.get_worksheet(0)
 
-        # === 2. Единый и оптимизированный запрос данных от WB API ===
-        logger.info("Запрашиваю данные от WB API (детализация, заказы, хранение)...")
+        # === 2. ОПТИМИЗИРОВАННЫЙ И ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПРОС ДАННЫХ ===
+        logger.info("Запрашиваю данные от WB API (фаза 1: заказы и хранение)...")
 
-        # Делаем ТРИ параллельных запроса за ВЕСЬ выбранный пользователем период
-        report_data_task = get_wb_weekly_report(api_key, start_date, end_date, period="daily")
+        # 1. Формируем и параллельно запускаем "медленные" задачи к РАЗНЫМ доменам
         orders_task = get_wb_orders(api_key, start_date, end_date)
         storage_report_task = get_wb_paid_storage_report(api_key, start_date, end_date)
 
-        report_data, orders_data, storage_data = await asyncio.gather(
-            report_data_task, orders_task, storage_report_task
+        orders_data, storage_data = await asyncio.gather(
+            orders_task, storage_report_task
         )
 
-        # Последующий запрос рекламы, который зависит от orders_data
+        # 2. Формируем и параллельно запускаем вторую фазу запросов
+        logger.info("Запрашиваю данные от WB API (фаза 2: детализация и реклама)...")
+
+        # Сначала готовим target_nm_ids, так как он нужен для одной из задач
         target_nm_ids = {order['nmId'] for order in (orders_data or []) if 'nmId' in order}
         logger.info(f"Найдено {len(target_nm_ids)} уникальных nmId для запроса расходов на рекламу.")
-        ad_costs = await get_aggregated_ad_costs(api_key, start_date, end_date, target_nm_ids)
 
-        # Агрегация данных по хранению
+        # Создаем задачи
+        report_data_task = get_wb_weekly_report(api_key, start_date, end_date, period="daily")
+        ad_costs_task = get_aggregated_ad_costs(api_key, start_date, end_date, target_nm_ids)
+
+        # 3. Выполняем их одновременно
+        report_data, ad_costs = await asyncio.gather(
+            report_data_task, ad_costs_task
+        )
+
+        # 4. Агрегируем данные по хранению (теперь это просто обработка уже полученных данных)
         storage_costs = defaultdict(float)
         if storage_data:
             for row in storage_data:
@@ -780,7 +790,7 @@ async def fill_pnl_report(
                 if all(key):
                     storage_costs[key] += row.get("warehousePrice", 0)
 
-        # Проверка на критическую ошибку API при получении основных данных
+        # 5. Проверяем на критическую ошибку API
         if report_data is None or orders_data is None:
             logger.error("Критическая ошибка API: не удалось получить основные данные (детализация или заказы).")
             raise Exception("API data fetch failed")
