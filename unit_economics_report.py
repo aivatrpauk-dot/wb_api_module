@@ -183,9 +183,17 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             products[key]["acceptance_rub"] += row.get("acceptance", 0)
             products[key]["storage_rub"] += row.get("storage_fee", 0)
             products[key]["penalty_rub"] += row.get("penalty", 0)
-            products[key]["adjustments_rub"] += row.get("additional_payment", 0)
+            products[key]["to_pay_rub"] += row.get("ppvz_for_pay", 0)
+            products[key]["total_retail_turnover_rub"] += row.get("retail_amount", 0)
+            adjustments = (
+                    row.get("additional_payment", 0) +
+                    row.get("cashback_amount", 0) +
+                    row.get("cashback_discount", 0) +
+                    row.get("cashback_commission_change", 0)
+            )
+            products[key]["adjustments_rub"] += adjustments
 
-        # 2. Агрегируем рекламу и хранение... (этот блок без изменений)
+        # 2. Агрегируем рекламу и хранение.
         ad_costs_by_nm = defaultdict(float)
         for (date_str, nm_id), cost in ad_costs.items(): ad_costs_by_nm[nm_id] += cost
         storage_costs_by_nm = defaultdict(float)
@@ -200,7 +208,16 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             drr_percent = (advertising_cost / p["sales_rub"]) if p["sales_rub"] > 0 else 0
             buyout_percent = (p["sales_pcs"] / p["orders_pcs"]) if p["orders_pcs"] > 0 else 0
 
-            # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+            # Рассчитываем "Итого к оплате" для этого артикула
+            total_to_pay_product = (
+                    p["to_pay_rub"] - p["adjustments_rub"] - p["penalty_rub"] -
+                    (p["logistics_forward_rub"] + p["logistics_reverse_rub"]) -
+                    storage_cost -  # Используем переменную, а не p["storage_rub"]
+                    p["acceptance_rub"] -
+                    advertising_cost -  # Используем переменную, а не p["ads_rub"]
+                    p["returns_rub"]
+            )
+
             row_data = [
                 key,  # Артикул (nmId)
                 product_names.get(key, ""),
@@ -211,7 +228,7 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
                 p["orders_pcs"], p["sales_pcs"], p["returns_pcs"],
                 buyout_percent,
                 storage_cost, 0,
-                p["commission_rub"], 0,
+                p["sales_rub"] - total_to_pay_product, 0,  # Комиссия руб, Комиссия %
                 p["logistics_forward_rub"], p["logistics_reverse_rub"],
                 0, 0,
                 advertising_cost, 0,

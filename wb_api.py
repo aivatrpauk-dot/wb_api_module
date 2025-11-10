@@ -24,33 +24,25 @@ PAID_STORAGE_MAX_WAIT_TIME = 300  # 5 минут
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ========================================
 
-def _is_within_date_range(record: dict, start_dt_utc: datetime, end_dt_utc: datetime) -> bool:
+def _is_within_date_range(record: dict, start_dt_moscow: datetime, end_dt_moscow: datetime) -> bool:
     """
-    Проверяет, находится ли дата записи в заданном UTC диапазоне.
-    Корректно обрабатывает naive datetime, предполагая, что они в московском времени.
+    Проверяет, находится ли 'date' (дата создания заказа) в заданном московском диапазоне.
     """
-    # Для заказов и продаж используем lastChangeDate как основной источник времени
-    date_str = record.get("lastChangeDate") or record.get("date")
-    if not date_str:
+    order_date_str = record.get("date")
+    if not order_date_str:
         return False
 
     try:
-        # Пытаемся распарсить как aware datetime
-        if 'Z' in date_str or '+' in date_str.split('T')[1]:
-            dt_aware = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        else:
-            # Если дата naive (нет Z или смещения), считаем, что это Москва
-            tz_moscow = pytz.timezone('Europe/Moscow')
-            dt_naive = datetime.fromisoformat(date_str)
-            dt_aware = tz_moscow.localize(dt_naive)
+        # Даты от API приходят как naive, но мы знаем, что это Москва
+        tz_moscow = pytz.timezone('Europe/Moscow')
+        order_dt_naive = datetime.fromisoformat(order_date_str)
+        order_dt_moscow = tz_moscow.localize(order_dt_naive)
 
-        # Конвертируем в UTC для сравнения
-        dt_utc = dt_aware.astimezone(pytz.utc)
+        # Сравниваем aware datetime с aware datetime
+        return start_dt_moscow <= order_dt_moscow <= end_dt_moscow
 
-        return start_dt_utc <= dt_utc <= end_dt_utc
-
-    except (ValueError, TypeError) as e:
-        logger.warning(f"Некорректный формат даты в записи: '{date_str}'. Ошибка: {e}")
+    except (ValueError, TypeError):
+        logger.warning(f"Некорректный формат 'date' в заказе: {order_date_str}")
         return False
 
 
@@ -118,56 +110,60 @@ async def get_wb_orders(
         end_date: datetime
 ) -> List[dict] | None:
     """
-    Получает список заказов через /api/v1/supplier/orders.
-    ВАЖНО: Логика изменена для пагинации и фильтрации строго по полю 'date'.
+    Получает список заказов через /api/v1/supplier/orders с быстрой пагинацией
+    по 'lastChangeDate' и последующей точной фильтрацией по 'date'.
     """
     url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
     headers = {"Authorization": api_key}
-    all_orders = []
+    all_orders_raw = []
 
-    # Устанавливаем часовой пояс Москвы
+    # Готовим границы периода в московском времени для финальной фильтрации
     tz_moscow = pytz.timezone('Europe/Moscow')
-    start_dt_moscow = start_date if start_date.tzinfo else tz_moscow.localize(start_date)
-    end_dt_moscow = end_date if end_date.tzinfo else tz_moscow.localize(end_date)
+    start_dt_moscow = (start_date if start_date.tzinfo else tz_moscow.localize(start_date)).replace(hour=0, minute=0,
+                                                                                                    second=0)
+    end_dt_moscow = (end_date if end_date.tzinfo else tz_moscow.localize(end_date)).replace(hour=23, minute=59,
+                                                                                            second=59)
 
-    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Пагинация по `date`, а не `lastChangeDate` ---
-    # Мы не можем использовать стандартную пагинацию, т.к. API ее не поддерживает по 'date'.
-    # Поэтому мы будем запрашивать данные по дням. Это надежнее.
-
-    current_day = start_dt_moscow.date()
-    end_day = end_dt_moscow.date()
+    # Для API WB dateFrom должен быть в формате ISO
+    current_date_from = start_dt_moscow.isoformat()
 
     async with aiohttp.ClientSession() as session:
-        while current_day <= end_day:
-            date_str = current_day.strftime("%Y-%m-%d")
-            params = {"dateFrom": date_str, "flag": 1}  # flag=1 - данные за указанную дату
+        while True:
+            # Используем flag=0 для быстрой пагинации
+            params = {"dateFrom": current_date_from, "flag": 0}
 
             status, data_or_text = await _fetch_with_simple_retry(
-                session, url, headers, params, "Orders API (by day)"
+                session, url, headers, params, "Orders API (flag=0)"
             )
 
             if status == 200 and isinstance(data_or_text, list):
-                # Дополнительно фильтруем на нашей стороне, чтобы убедиться
-                for order in data_or_text:
-                    order_date_str = order.get("date")
-                    if not order_date_str: continue
-                    try:
-                        # Приводим дату заказа к aware datetime
-                        order_dt_naive = datetime.fromisoformat(order_date_str)
-                        order_dt_moscow = tz_moscow.localize(order_dt_naive)
-                        # И проверяем, что она точно в нашем диапазоне
-                        if start_dt_moscow <= order_dt_moscow <= end_dt_moscow:
-                            all_orders.append(order)
-                    except (ValueError, TypeError):
-                        continue
+                data = data_or_text
+                if not data:
+                    break  # Данные закончились
+
+                all_orders_raw.extend(data)
+
+                last_change_date = data[-1].get("lastChangeDate")
+                if not last_change_date:
+                    logger.warning("Отсутствует lastChangeDate, прерывание пагинации.")
+                    break
+
+                current_date_from = last_change_date
+
+                # Оптимизация: если lastChangeDate вышел далеко за наш период, можно остановиться.
+                # Но для надежности можно просто дождаться конца данных.
+
             else:
-                logger.error(f"Orders API ошибка для даты {date_str}: {status} — {data_or_text}")
-                # Продолжаем, чтобы не прерывать сбор за другие дни
+                logger.error(f"Orders API ошибка: {status} — {data_or_text}")
+                return None
 
-            current_day += timedelta(days=1)
-            await asyncio.sleep(61)  # Пауза, чтобы не превышать лимиты
+    # Финальная, самая важная часть: фильтруем все полученные "сырые" данные
+    # по полю 'date' (дата создания заказа).
+    logger.info(f"Получено {len(all_orders_raw)} сырых записей по заказам. Фильтрую по дате создания...")
+    filtered_orders = [r for r in all_orders_raw if _is_within_date_range(r, start_dt_moscow, end_dt_moscow)]
+    logger.info(f"Осталось {len(filtered_orders)} заказов после фильтрации.")
 
-    return all_orders
+    return filtered_orders
 
 
 ### НЕ ИСПОЛЬЗОВАЛАСЬ ###
