@@ -46,9 +46,6 @@ def _is_within_date_range(record: dict, start_dt_moscow: datetime, end_dt_moscow
         return False
 
 
-# --- wb_api.py ---
-
-# ЗАМЕНИТЬ ЭТУ ФУНКЦИЮ
 async def _fetch_with_simple_retry(
         session: aiohttp.ClientSession,
         url: str,
@@ -86,7 +83,7 @@ async def _fetch_with_simple_retry(
                         return resp.status, error_text
 
         except Exception as e:
-            # --- УЛУЧШЕННОЕ ЛОГИРОВАНИЕ ИСКЛЮЧЕНИЙ ---
+            # ---  ЛОГИРОВАНИЕ ИСКЛЮЧЕНИЙ ---
             logger.error(
                 f"{method_name}: Exception (попытка {attempt}/{MAX_RETRIES}): {type(e).__name__} - {e}",
                 exc_info=True  # Добавляем полный трейсбек в лог
@@ -150,14 +147,12 @@ async def get_wb_orders(
 
                 current_date_from = last_change_date
 
-                # Оптимизация: если lastChangeDate вышел далеко за наш период, можно остановиться.
-                # Но для надежности можно просто дождаться конца данных.
 
             else:
                 logger.error(f"Orders API ошибка: {status} — {data_or_text}")
                 return None
 
-    # Финальная, самая важная часть: фильтруем все полученные "сырые" данные
+    # Финальная часть: фильтруем все полученные "сырые" данные
     # по полю 'date' (дата создания заказа).
     logger.info(f"Получено {len(all_orders_raw)} сырых записей по заказам. Фильтрую по дате создания...")
     filtered_orders = [r for r in all_orders_raw if _is_within_date_range(r, start_dt_moscow, end_dt_moscow)]
@@ -461,7 +456,6 @@ async def get_wb_paid_storage_report(
     return all_report_data
 
 
-# ДОБАВИТЬ НОВУЮ ВСПОМОГАТЕЛЬНУЮ ФУНКЦИЮ (можно после get_wb_paid_storage_report)
 async def _get_single_paid_storage_chunk(api_key: str, date_from: str, date_to: str) -> List[Dict[str, Any]] | None:
     """Внутренняя функция для получения одного чанка отчета по хранению."""
     # Код из старой get_wb_paid_storage_report, адаптированный

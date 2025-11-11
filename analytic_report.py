@@ -14,8 +14,6 @@ from unit_economics_report import create_unit_economics_sheet, fill_unit_economi
 from wb_advert import get_aggregated_ad_costs
 
 
-
-
 logger = logging.getLogger(__name__)
 
 # Области доступа для Google Sheets API
@@ -149,7 +147,9 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
         Продажи до СПП         -      retail_amount * quantity (для продаж)
         Себестоймость продаж   -      
         Потери от брака        -      
-        Комиссия               -      sales_before_spp - ppvz_for_pay
+        Базовая комиссия       -      Комиссия ИТОГО - ССП
+        СПП                    -      sales_before_spp*ppvz_spp_prc
+        Комиссия ИТОГО         -      sales_before_spp - ppvz_for_pay
         Возвраты               -      retail_amount * quantity (для возвратов)
         Реклама                -      deduction
         Прямая логистика       -      delivery_rub - rebill_logistic_cost
@@ -175,7 +175,7 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
 
         headers = [
             "Дата", "Количество заказов", "Заказы", "Выкупили", "Продажи до СПП",
-            "Себестоймость продаж", "Потери от брака", "Комиссия", "Возвраты", "Реклама",
+            "Себестоймость продаж", "Потери от брака", "Базовая комиссия", "СПП", "Комиссия ИТОГ", "Возвраты", "Реклама",
             "Прямая логистика", "Обратная логистика", "Хранение", "Приемка",
             "Корректировки", "Штрафы", "Итого к оплате", "Опер затраты",
             "Ebitda/%", "", "Налоги", "Кредит", "Чистая прибыль/ROI", ""
@@ -215,6 +215,8 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
 
             doc_type = (row.get("doc_type_name") or "").lower()
             quantity = row.get("quantity", 0)
+            spp_amount = row.get("retail_amount", 0) * (row.get("ppvz_spp_prc", 0) / 100)
+            daily_aggr[date_str]["spp"] += spp_amount
             if "продажа" in doc_type:
                 daily_aggr[date_str]["sales_quantity"] += quantity
                 daily_aggr[date_str]["sales_before_spp"] += row.get("retail_amount", 0)
@@ -230,7 +232,9 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
         while current <= end_date:
             date_str = current.strftime("%Y-%m-%d")
             day_data = daily_aggr[date_str]
-
+            commission_total = day_data["sales_before_spp"] - day_data["to_pay"]
+            spp = day_data["spp"]
+            commission_base = commission_total + spp
             # Расчет "Итого к оплате"
             total_to_pay_day = (day_data["to_pay"] - day_data["adjustments"] - day_data["penalties"] -
                                 (day_data["forward_logistics"] + day_data["reverse_logistics"]) -
@@ -244,7 +248,7 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
                 int(day_data["sales_quantity"]),
                 day_data["sales_before_spp"],
                 0, 0,
-                day_data["sales_before_spp"] - total_to_pay_day,
+                commission_base, spp, commission_total,
                 day_data["returns"],
                 day_data["advertising"],
                 day_data["forward_logistics"],
@@ -427,7 +431,9 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         Выкупы, шт             -      quantity (для продаж)
         Возвраты по браку, шт  -      
         % выкупа               -      
-        Комиссия               -      sales_before_spp - ppvz_for_pay
+        Базовая комиссия       -      Комиссия ИТОГО - ССП
+        СПП                    -      sales_before_spp*ppvz_spp_prc
+        Комиссия ИТОГО         -      sales_before_spp - ppvz_for_pay
         Логистика прямая       -      delivery_rub - rebill_logistic_cost
         Логистика обратная     -      rebill_logistic_cost
         Хранение               -      storage_fee
@@ -453,7 +459,9 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
             "Выкупы, шт",
             "Возвраты по браку, шт",
             "% выкупа",
-            "Комиссия",
+            "Базовая комиссия",
+            "СПП",
+            "Комиссия ИТОГ",
             "Логистика прямая",
             "Логистика обратная",
             "Хранение",
@@ -481,7 +489,8 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
             "oper_expenses": 0,
             "to_pay": 0,
             "total_to_pay": 0,
-            "total_retail_turnover": 0
+            "total_retail_turnover": 0,
+            "spp": 0
         })
 
         for row in daily_data:
@@ -504,7 +513,8 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
 
             is_sale = "продажа" in doc_type
             is_return = "возврат" in doc_type
-
+            spp_amount = row.get("retail_amount", 0) * quantity * (row.get("ppvz_spp_prc", 0) / 100)
+            products[nm_id]["spp"] += spp_amount
             if is_sale:
                 products[nm_id]["sales_quantity"] += quantity
                 products[nm_id]["sales_before_spp"] += row.get("retail_amount", 0) * quantity
@@ -539,13 +549,9 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         data = [headers]
         for nm_id in sorted(products.keys()):
             p = products[nm_id]
-            # Рассчитываем "Итого к оплате" для этого артикула
-            total_to_pay_product = (
-                    p["to_pay"] - p["adjustments"] - p["penalties"] -
-                    (p["forward_logistics"] + p["reverse_logistics"]) -
-                    p["storage"] - p["acceptance"] - p["advertising"] -
-                    p["returns"]
-            )
+            commission_total = p["sales_before_spp"] - p["to_pay"]
+            spp = p["spp"]
+            commission_base = commission_total + spp
 
             row = [
                 nm_id,
@@ -556,7 +562,7 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
                 p["sales_quantity"],
                 0,
                 0, # % выкупа
-                p["sales_before_spp"] - total_to_pay_product,  # комиссия
+                commission_base, spp, commission_total,
                 p["forward_logistics"],
                 p["reverse_logistics"],
                 p["storage"],
@@ -603,6 +609,21 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         if format_requests:
             ws.batch_format(format_requests)
 
+        # --- БЛОК ДЛЯ ФОРМАТИРОВАНИЯ ДАННЫХ ---
+        num_rows = len(data)
+        if num_rows > 1:
+            # Формат валюты
+            ws.format(f"B2:D{num_rows}", {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})
+            ws.format(f"I2:K{num_rows}",
+                      {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})  # Баз.Ком, СПП, Ком.Итог
+            ws.format(f"L2:P{num_rows}",
+                      {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})  # Логистика и далее
+
+            # Формат целых чисел
+            ws.format(f"E2:G{num_rows}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
+
+            # Формат процентов
+            ws.format(f"H2:H{num_rows}", {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
     except Exception as e:
         logger.error(
             f"Ошибка при заполнении 'Товарная аналитика (недельная)': {e}")
@@ -720,8 +741,6 @@ async def fill_product_analytics_daily_sheet(spreadsheet, products, acceptance_b
 # ========================================
 # ОСНОВНАЯ ФУНКЦИЯ
 # ========================================
-
-# --- analytic_report.py ---
 
 async def fill_pnl_report(
         spreadsheet_id: str,

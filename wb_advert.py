@@ -1,4 +1,3 @@
-# --- START OF FILE wb_advert.py ---
 import asyncio
 import logging
 import json
@@ -33,7 +32,6 @@ def _save_debug_json(filename: str, data: dict | list):
 # --- Вспомогательная функция (без изменений) ---
 async def _make_advert_request(session: aiohttp.ClientSession, method: str, url: str,
                                **kwargs) -> aiohttp.ClientResponse | None:
-    # ... (код этой функции не меняется)
     for attempt in range(MAX_RETRIES):
         try:
             response = await session.request(method, url, **kwargs)
@@ -150,7 +148,7 @@ async def _get_fullstats_data(session: aiohttp.ClientSession, api_key: str, camp
 
             response = await _make_advert_request(session, "GET", url, headers=headers, params=params, timeout=120)
 
-            # --- ИЗМЕНЕНИЕ: Обрабатываем специфичную ошибку 400 ---
+            # --- Обрабатываем специфичную ошибку 400 ---
             if response and response.status == 200:
                 stats_data = await response.json()
                 _save_debug_json(f"3_fullstats_chunk_{i}.json", stats_data)
@@ -163,7 +161,6 @@ async def _get_fullstats_data(session: aiohttp.ClientSession, api_key: str, camp
                 else:
                     # Если это другая ошибка 400, логируем ее как обычно
                     logger.error(f"Client Advert API Error 400 for {url}: {error_text}")
-            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
             is_last_chunk = (i + id_chunk_size >= len(campaign_ids)) and (current_end_date >= end_date)
             if not is_last_chunk:
@@ -196,7 +193,7 @@ Dict[Tuple[str, int], float]:
             logger.info("--- [FINISH] No fullstats data received. ---")
             return {}
 
-    # --- ИСПРАВЛЕННАЯ ЛОГИКА ПАРСИНГА ---
+    # ---  ЛОГИКА ПАРСИНГА ---
     logger.info(f"Processing {len(fullstats_data)} raw stats entries...")
     for campaign_stat in fullstats_data:
         # Итерируемся по дням
@@ -218,9 +215,6 @@ Dict[Tuple[str, int], float]:
 
                     key = (date_str, nm_id)
                     ad_costs_agg[key] += cost
-    # --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ ---
 
     logger.info(f"--- [SUCCESS] Advertising costs aggregated for {len(ad_costs_agg)} (date, nmId) pairs. ---")
     return dict(ad_costs_agg)
-
-# --- END OF FILE wb_advert.py ---

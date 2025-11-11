@@ -1,4 +1,3 @@
-# --- START OF FILE unit_economics_report.py ---
 import gspread
 import logging
 from collections import defaultdict
@@ -7,7 +6,7 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 
-# --- Функции для создания структуры (остаются без изменений) ---
+# --- Функции для создания структуры ---
 
 def _define_headers():
     """Определяет двухуровневые заголовки для отчета (без колонки 'Дата')."""
@@ -21,7 +20,7 @@ def _define_headers():
         "Заказы (шт)", "Выкупы (шт)", "Возвраты по браку (шт)",
         "% выкупа",
         "Хранение", None,
-        "Комиссия", None,
+        "Базовая комиссия", None, "СПП", None, "Комиссия ИТОГ", None,
         "Логистика прямая", "Логистика обратная",
         "% логистики", "Логистика на ед",
         "Реклама", None,
@@ -31,7 +30,7 @@ def _define_headers():
     sub_headers = [
         "", "",
         "руб", "%", "руб", "руб", "руб", "%", "руб", "%", "руб",
-        "шт", "шт", "шт", "%", "руб", "%", "руб", "%", "руб", "руб", "%", "руб", "руб", "%", "%",
+        "шт", "шт", "шт", "%", "руб", "%", "руб", "%", "руб", "%", "руб", "%", "руб", "руб", "%", "руб", "руб", "%", "%",
         "руб", "руб", "руб"
     ]
     return main_headers, sub_headers
@@ -39,21 +38,38 @@ def _define_headers():
 
 def _build_requests(sheet_id: int):
     """
-    Создает запросы для форматирования (с учетом сдвига колонок).
+    Создает запросы для форматирования с учетом новых колонок для комиссии.
     """
     requests = []
 
     # --- 1. ЗАПРОСЫ НА ОБЪЕДИНЕНИЕ ЯЧЕЕК ---
+    # Формат кортежа: (start_row, start_col, row_span, col_span)
+
+    # Горизонтальное объединение (в первой строке)
     horizontal_merges = [
-        (1, 3, 1, 2), (1, 7, 1, 2), (1, 9, 1, 2), (1, 16, 1, 2),
-        (1, 18, 1, 2), (1, 24, 1, 2)
+        (1, 3, 1, 2),  # Маржинальная прибыль (C1:D1)
+        (1, 7, 1, 2),  # Себестоимость продаж (G1:H1)
+        (1, 9, 1, 2),  # Потери по браку (I1:J1)
+        (1, 16, 1, 2),  # Хранение (P1:Q1)
+        (1, 18, 1, 2),  # Базовая комиссия (R1:S1)
+        (1, 20, 1, 2),  # СПП (T1:U1)
+        (1, 22, 1, 2),  # Комиссия ИТОГ (V1:W1)
+        (1, 28, 1, 2),  # Реклама (AB1:AC1)
     ]
+
+    # Вертикальное объединение (строки 1 и 2)
     vertical_merges = [
-        (1, 1, 2, 1), (1, 2, 2, 1), (1, 5, 2, 1), (1, 6, 2, 1), (1, 11, 2, 1),
-        (1, 12, 2, 1), (1, 13, 2, 1), (1, 14, 2, 1), (1, 15, 2, 1), (1, 20, 2, 1),
-        (1, 21, 2, 1), (1, 22, 2, 1), (1, 23, 2, 1), (1, 26, 2, 1), (1, 27, 2, 1),
-        (1, 28, 2, 1), (1, 29, 2, 1)
+        (1, 1, 2, 1), (1, 2, 2, 1),  # Артикул, Наименование
+        (1, 5, 2, 1), (1, 6, 2, 1),  # Заказы руб, Выкупы руб
+        (1, 11, 2, 1),  # Возвраты по браку (руб)
+        (1, 12, 2, 1), (1, 13, 2, 1), (1, 14, 2, 1),  # Заказы (шт), ...
+        (1, 15, 2, 1),  # % выкупа
+        (1, 24, 2, 1), (1, 25, 2, 1),  # Логистика
+        (1, 26, 2, 1), (1, 27, 2, 1),  # % логистики
+        (1, 30, 2, 1),  # % (ДРР)
+        (1, 31, 2, 1), (1, 32, 2, 1), (1, 33, 2, 1)  # Приемка, ...
     ]
+
     all_merges = horizontal_merges + vertical_merges
     for row, col, row_span, col_span in all_merges:
         requests.append({"mergeCells": {"range": {
@@ -83,8 +99,16 @@ def _build_requests(sheet_id: int):
 
     # --- 3. ЗАПРОСЫ НА УСТАНОВКУ ШИРИНЫ СТОЛБЦОВ ---
     column_widths = [
-        120, 250, 110, 60, 110, 110, 110, 60, 110, 60, 130, 90, 90, 130, 90,
-        100, 60, 100, 60, 130, 130, 100, 130, 100, 60, 80, 100, 100, 110
+        # A,   B,      C,   D,    E,     F,       G,   H,    I,    J,     K,
+        120, 250, 110, 60, 110, 110, 110, 60, 110, 60, 130,
+        # L,    M,    N,    O,       P,    Q,
+        90, 90, 130, 90, 100, 60,
+        # --- НОВЫЕ КОЛОНКИ ---
+        # R (Баз.Ком), S(%), T(СПП), U(%), V(Ком.Итог), W(%)
+        110, 60, 110, 60, 110, 60,
+        # --- СДВИНУТЫЕ КОЛОНКИ ---
+        # X(Лог.Прям), Y(Лог.Обр), Z(%), AA(на ед), AB(Рек), AC(%), AD(ДРР), AE(Прием), AF(Штраф), AG(Корр)
+        130, 130, 100, 130, 100, 60, 80, 100, 100, 110
     ]
     for i, width in enumerate(column_widths):
         requests.append({"updateDimensionProperties": {
@@ -124,25 +148,48 @@ async def create_unit_economics_sheet(spreadsheet: gspread.Spreadsheet):
         logger.error(f"Ошибка при создании листа '{SHEET_NAME}': {e}", exc_info=True)
 
 
-# --- НОВЫЕ ФУНКЦИИ ДЛЯ НАПОЛНЕНИЯ ДАННЫМИ ---
+# --- ФУНКЦИИ ДЛЯ НАПОЛНЕНИЯ ДАННЫМИ ---
 
 def _apply_data_formatting(worksheet: gspread.Worksheet, last_row: int):
-    """Применяет форматирование чисел к строкам с данными."""
+    """Применяет форматирование чисел к строкам с данными (Скорректированная версия)."""
     if last_row <= 2:
         return
 
-    # Формат "Рубли"
-    currency_ranges = [f"D3:K{last_row}", f"L3:L{last_row}", f"Q3:R{last_row}", f"S3:T{last_row}", f"U3:V{last_row}",
-                       f"X3:Z{last_row}", f"AB3:AD{last_row}"]
+    # Формат "Рубли" (CURRENCY)
+    currency_ranges = [
+        f"C3:D{last_row}",  # Марж. прибыль
+        f"E3:H{last_row}",  # Заказы, Выкупы, Себест., Потери
+        f"I3:J{last_row}",
+        f"K3:K{last_row}",  # Возвраты по браку
+        f"P3:P{last_row}",  # Хранение руб
+        f"R3:R{last_row}",  # Баз. Ком. руб
+        f"T3:T{last_row}",  # СПП руб
+        f"V3:V{last_row}",  # Ком. ИТОГ руб
+        f"X3:Y{last_row}",  # Логистика
+        f"AA3:AA{last_row}",  # Логистика на ед
+        f"AB3:AB{last_row}",  # Реклама руб
+        f"AD3:AG{last_row}",  # Приемка, Штрафы, Корр.
+    ]
     for r in currency_ranges:
         worksheet.format(r, {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})
 
-    # Формат "Штуки" (целое число)
-    worksheet.format(f"M3:O{last_row}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
+    # Формат "Штуки" (NUMBER, 0)
+    worksheet.format(f"L3:N{last_row}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
 
-    # Формат "Проценты"
-    percent_ranges = [f"E3:E{last_row}", f"I3:I{last_row}", f"K3:K{last_row}", f"P3:P{last_row}", f"R3:R{last_row}",
-                      f"T3:T{last_row}", f"W3:W{last_row}", f"AA3:AA{last_row}"]
+    # Формат "Проценты" (PERCENT)
+    percent_ranges = [
+        f"D3:D{last_row}",  # Марж. прибыль %
+        f"H3:H{last_row}",  # Себест. %
+        f"J3:J{last_row}",  # Потери %
+        f"O3:O{last_row}",  # % выкупа
+        f"Q3:Q{last_row}",  # Хранение %
+        f"S3:S{last_row}",  # Баз. Ком. %
+        f"U3:U{last_row}",  # СПП %
+        f"W3:W{last_row}",  # Ком. ИТОГ %
+        f"Z3:Z{last_row}",  # % логистики
+        f"AC3:AC{last_row}",  # Реклама %
+        f"AD3:AD{last_row}",  # % (ДРР)
+    ]
     for r in percent_ranges:
         worksheet.format(r, {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
 
@@ -157,7 +204,7 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
         logger.info(f"Начало заполнения листа '{SHEET_NAME}' (агрегация по артикулам)...")
         worksheet = spreadsheet.worksheet(SHEET_NAME)
 
-        # 1. Агрегация данных... (этот блок без изменений)
+        # 1. Агрегация данных.
         products = defaultdict(lambda: defaultdict(float))
         product_names = {}
         for order in orders_data:
@@ -177,7 +224,6 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             elif "возврат" in doc_type:
                 products[key]["returns_rub"] += row.get("retail_amount", 0)
                 products[key]["returns_pcs"] += row.get("quantity", 0)
-            products[key]["commission_rub"] += row.get("ppvz_vw", 0) + row.get("ppvz_vw_nds", 0)
             products[key]["logistics_forward_rub"] += row.get("delivery_rub", 0) - row.get("rebill_logistic_cost", 0)
             products[key]["logistics_reverse_rub"] += row.get("rebill_logistic_cost", 0)
             products[key]["acceptance_rub"] += row.get("acceptance", 0)
@@ -185,6 +231,8 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             products[key]["penalty_rub"] += row.get("penalty", 0)
             products[key]["to_pay_rub"] += row.get("ppvz_for_pay", 0)
             products[key]["total_retail_turnover_rub"] += row.get("retail_amount", 0)
+            spp_amount = row.get("retail_amount", 0) * (row.get("ppvz_spp_prc", 0) / 100)
+            products[key]["spp_rub"] += spp_amount
             adjustments = (
                     row.get("additional_payment", 0) +
                     row.get("cashback_amount", 0) +
@@ -207,16 +255,9 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             storage_cost = storage_costs_by_nm.get(key, 0.0)
             drr_percent = (advertising_cost / p["sales_rub"]) if p["sales_rub"] > 0 else 0
             buyout_percent = (p["sales_pcs"] / p["orders_pcs"]) if p["orders_pcs"] > 0 else 0
-
-            # Рассчитываем "Итого к оплате" для этого артикула
-            total_to_pay_product = (
-                    p["to_pay_rub"] - p["adjustments_rub"] - p["penalty_rub"] -
-                    (p["logistics_forward_rub"] + p["logistics_reverse_rub"]) -
-                    storage_cost -  # Используем переменную, а не p["storage_rub"]
-                    p["acceptance_rub"] -
-                    advertising_cost -  # Используем переменную, а не p["ads_rub"]
-                    p["returns_rub"]
-            )
+            commission_total = p["sales_rub"] - p["to_pay_rub"]
+            spp = p["spp_rub"]
+            commission_base = commission_total + spp
 
             row_data = [
                 key,  # Артикул (nmId)
@@ -228,7 +269,9 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
                 p["orders_pcs"], p["sales_pcs"], p["returns_pcs"],
                 buyout_percent,
                 storage_cost, 0,
-                p["sales_rub"] - total_to_pay_product, 0,  # Комиссия руб, Комиссия %
+                commission_base, 0,  # Базовая комиссия руб, %
+                spp, 0,  # СПП руб, %
+                commission_total, 0,  # Комиссия ИТОГ руб, %
                 p["logistics_forward_rub"], p["logistics_reverse_rub"],
                 0, 0,
                 advertising_cost, 0,
@@ -237,19 +280,12 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             ]
             rows_to_insert.append(row_data)
 
-        # 4. Запись данных в таблицу (этот блок без изменений)
+        # 4. Запись данных в таблицу
         if rows_to_insert:
             worksheet.update('A3', rows_to_insert, value_input_option='USER_ENTERED')
             # Корректируем диапазоны форматирования данных
-            last_row = 2 + len(rows_to_insert)
-            currency_ranges = [f"C3:J{last_row}", f"K3:K{last_row}", f"P3:Q{last_row}", f"R3:S{last_row}",
-                               f"T3:U{last_row}", f"W3:Y{last_row}", f"AA3:AC{last_row}"]
-            for r in currency_ranges: worksheet.format(r, {
-                "numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})
-            worksheet.format(f"L3:N{last_row}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
-            percent_ranges = [f"D3:D{last_row}", f"H3:H{last_row}", f"J3:J{last_row}", f"O3:O{last_row}",
-                              f"Q3:Q{last_row}", f"S3:S{last_row}", f"V3:V{last_row}", f"Z3:Z{last_row}"]
-            for r in percent_ranges: worksheet.format(r, {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
+            _apply_data_formatting(worksheet, 2 + len(rows_to_insert))
+
             logger.info(f"Лист '{SHEET_NAME}' успешно заполнен. Добавлено строк: {len(rows_to_insert)}")
         else:
             logger.info(f"Данные для заполнения листа '{SHEET_NAME}' отсутствуют.")
