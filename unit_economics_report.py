@@ -9,76 +9,55 @@ logger = logging.getLogger(__name__)
 # --- Функции для создания структуры ---
 
 def _define_headers():
-    """Определяет двухуровневые заголовки для отчета (без колонки 'Дата')."""
-    main_headers = [
+    """Определяет ОДНОУРОВНЕВЫЕ заголовки для отчета."""
+    headers = [
         "Артикул (nmId)", "Наименование",
-        "Маржинальная прибыль", None,
+        "Маржинальная прибыль", "", # <-- Пустая строка для '%'
         "Заказы руб", "Выкупы руб",
-        "Себестоимость продаж", None,
-        "Потери по браку", None,
+        "Себестоимость продаж", "", # <-- Пустая строка для '%'
+        "Потери по браку", "",      # <-- Пустая строка для '%'
         "Возвраты по браку (руб)",
         "Заказы (шт)", "Выкупы (шт)", "Возвраты по браку (шт)",
         "% выкупа",
-        "Хранение", None,
-        "Базовая комиссия", None, "СПП", None, "Комиссия ИТОГ", None,
+        "Хранение", "",             # <-- Пустая строка для '%'
+        "Базовая комиссия", "",     # <-- Пустая строка для '%'
+        "СПП", "",                  # <-- Пустая строка для '%'
+        "Комиссия ИТОГ", "",        # <-- Пустая строка для '%'
         "Логистика прямая", "Логистика обратная",
         "% логистики", "Логистика на ед",
-        "Реклама", None,
+        "Реклама", "",              # <-- Пустая строка для '%'
         "% (ДРР)",
         "Приемка", "Штрафы", "Корректировки"
     ]
-    sub_headers = [
-        "", "",
-        "руб", "%", "руб", "руб", "руб", "%", "руб", "%", "руб",
-        "шт", "шт", "шт", "%", "руб", "%", "руб", "%", "руб", "%", "руб", "%", "руб", "руб", "%", "руб", "руб", "%", "%",
-        "руб", "руб", "руб"
-    ]
-    return main_headers, sub_headers
+    return headers
 
 
 def _build_requests(sheet_id: int):
     """
-    Создает запросы для форматирования с учетом новых колонок для комиссии.
+    Создает запросы для форматирования с ОДНОУРОВНЕВОЙ шапкой.
     """
     requests = []
 
-    # --- 1. ЗАПРОСЫ НА ОБЪЕДИНЕНИЕ ЯЧЕЕК ---
-    # Формат кортежа: (start_row, start_col, row_span, col_span)
-
-    # Горизонтальное объединение (в первой строке)
+    # --- 1. ЗАПРОСЫ НА ОБЪЕДИНЕНИЕ ЯЧЕЕК (только горизонтальное) ---
     horizontal_merges = [
-        (1, 3, 1, 2),  # Маржинальная прибыль (C1:D1)
-        (1, 7, 1, 2),  # Себестоимость продаж (G1:H1)
-        (1, 9, 1, 2),  # Потери по браку (I1:J1)
-        (1, 16, 1, 2),  # Хранение (P1:Q1)
-        (1, 18, 1, 2),  # Базовая комиссия (R1:S1)
-        (1, 20, 1, 2),  # СПП (T1:U1)
-        (1, 22, 1, 2),  # Комиссия ИТОГ (V1:W1)
-        (1, 28, 1, 2),  # Реклама (AB1:AC1)
+        (1, 3, 1, 2),  # Маржинальная прибыль
+        (1, 7, 1, 2),  # Себестоимость продаж
+        (1, 9, 1, 2),  # Потери по браку
+        (1, 16, 1, 2),  # Хранение
+        (1, 18, 1, 2),  # Базовая комиссия
+        (1, 20, 1, 2),  # СПП
+        (1, 22, 1, 2),  # Комиссия ИТОГ
+        (1, 28, 1, 2),  # Реклама
     ]
 
-    # Вертикальное объединение (строки 1 и 2)
-    vertical_merges = [
-        (1, 1, 2, 1), (1, 2, 2, 1),  # Артикул, Наименование
-        (1, 5, 2, 1), (1, 6, 2, 1),  # Заказы руб, Выкупы руб
-        (1, 11, 2, 1),  # Возвраты по браку (руб)
-        (1, 12, 2, 1), (1, 13, 2, 1), (1, 14, 2, 1),  # Заказы (шт), ...
-        (1, 15, 2, 1),  # % выкупа
-        (1, 24, 2, 1), (1, 25, 2, 1),  # Логистика
-        (1, 26, 2, 1), (1, 27, 2, 1),  # % логистики
-        (1, 30, 2, 1),  # % (ДРР)
-        (1, 31, 2, 1), (1, 32, 2, 1), (1, 33, 2, 1)  # Приемка, ...
-    ]
-
-    all_merges = horizontal_merges + vertical_merges
-    for row, col, row_span, col_span in all_merges:
+    for row, col, row_span, col_span in horizontal_merges:
         requests.append({"mergeCells": {"range": {
             "sheetId": sheet_id,
             "startRowIndex": row - 1, "endRowIndex": row - 1 + row_span,
             "startColumnIndex": col - 1, "endColumnIndex": col - 1 + col_span
         }, "mergeType": "MERGE_ALL"}})
 
-    # --- 2. ЗАПРОСЫ НА ФОРМАТИРОВАНИЕ ---
+    # --- 2. ЗАПРОСЫ НА ФОРМАТИРОВАНИЕ (только для одной строки) ---
     requests.append({"repeatCell": {  # Формат 1-й строки
         "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
         "cell": {"userEnteredFormat": {"backgroundColor": {"red": 58 / 255, "green": 111 / 255, "blue": 149 / 255},
@@ -86,29 +65,17 @@ def _build_requests(sheet_id: int):
                                        "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
                                                       "fontSize": 10, "bold": True, "fontFamily": "Verdana"}}},
         "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)"}})
-    requests.append({"repeatCell": {  # Формат 2-й строки
-        "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": 2},
-        "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE",
-                                       "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0},
-                                                      "fontSize": 9, "bold": False, "fontFamily": "Verdana"}}},
-        "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat)"}})
-    requests.append({"repeatCell": {  # Формат данных
-        "range": {"sheetId": sheet_id, "startRowIndex": 2},
+
+    requests.append({"repeatCell": {  # Формат данных (теперь со 2-й строки)
+        "range": {"sheetId": sheet_id, "startRowIndex": 1},
         "cell": {"userEnteredFormat": {"textFormat": {"fontFamily": "Verdana", "fontSize": 11}}},
         "fields": "userEnteredFormat(textFormat)"}})
 
-    # --- 3. ЗАПРОСЫ НА УСТАНОВКУ ШИРИНЫ СТОЛБЦОВ ---
+    # --- 3. ЗАПРОСЫ НА УСТАНОВКУ ШИРИНЫ СТОЛБЦОВ (без изменений) ---
     column_widths = [
-        # A,   B,      C,   D,    E,     F,       G,   H,    I,    J,     K,
-        120, 250, 110, 60, 110, 110, 110, 60, 110, 60, 130,
-        # L,    M,    N,    O,       P,    Q,
-        90, 90, 130, 90, 100, 60,
-        # --- НОВЫЕ КОЛОНКИ ---
-        # R (Баз.Ком), S(%), T(СПП), U(%), V(Ком.Итог), W(%)
-        110, 60, 110, 60, 110, 60,
-        # --- СДВИНУТЫЕ КОЛОНКИ ---
-        # X(Лог.Прям), Y(Лог.Обр), Z(%), AA(на ед), AB(Рек), AC(%), AD(ДРР), AE(Прием), AF(Штраф), AG(Корр)
-        130, 130, 100, 130, 100, 60, 80, 100, 100, 110
+        120, 250, 110, 60, 110, 110, 110, 60, 110, 60, 130, 90, 90, 130, 90,
+        100, 60, 110, 60, 110, 60, 110, 60, 130, 130, 100, 130, 100, 60,
+        80, 100, 100, 110
     ]
     for i, width in enumerate(column_widths):
         requests.append({"updateDimensionProperties": {
@@ -120,75 +87,74 @@ def _build_requests(sheet_id: int):
 
 async def create_unit_economics_sheet(spreadsheet: gspread.Spreadsheet):
     """
-    Создает и форматирует лист "Юнит экономика" с правильным порядком операций.
+    Создает и форматирует лист "Юнит экономика" с одноуровневой шапкой.
     """
     SHEET_NAME = "Юнит экономика"
     try:
         logger.info(f"Создание листа '{SHEET_NAME}' в таблице '{spreadsheet.title}'")
 
-        # 1. Создаем лист и записываем заголовки
         worksheet = spreadsheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=35)
-        main_headers, sub_headers = _define_headers()
-        worksheet.update('A1', [main_headers, sub_headers])
 
-        # 2. Получаем ID листа и собираем все запросы на форматирование/объединение
+        # --- Записываем только один ряд заголовков ---
+        headers = _define_headers()
+        worksheet.update('A1', [headers])
+
         sheet_id = worksheet.id
         requests = _build_requests(sheet_id)
-
-        # 3. ВЫПОЛНЯЕМ BATCH_UPDATE (объединение, цвет, ширина)
         spreadsheet.batch_update({"requests": requests})
 
-        # 4. ВЫПОЛНЯЕМ ЗАМОРОЗКУ (ПОСЛЕ всех структурных изменений)
-        # Закрепляем 2 строки и 2 столбца (Артикул, Наименование)
-        worksheet.freeze(rows=2, cols=2)
+        # --- Закрепляем 1 строку и 2 столбца ---
+        worksheet.freeze(rows=1, cols=2)
 
         logger.info(f"Лист '{SHEET_NAME}' успешно создан и отформатирован.")
 
     except Exception as e:
         logger.error(f"Ошибка при создании листа '{SHEET_NAME}': {e}", exc_info=True)
 
-
 # --- ФУНКЦИИ ДЛЯ НАПОЛНЕНИЯ ДАННЫМИ ---
 
 def _apply_data_formatting(worksheet: gspread.Worksheet, last_row: int):
-    """Применяет форматирование чисел к строкам с данными (Скорректированная версия)."""
-    if last_row <= 2:
+    """
+    Применяет форматирование чисел к строкам с данными (одноуровневая шапка).
+    """
+    if last_row <= 1:  # Данные начинаются со 2-й строки
         return
 
-    # Формат "Рубли" (CURRENCY)
+    # --- Формат "Рубли" (CURRENCY) ---
+    # Диапазоны скорректированы с учетом сдвига колонок
     currency_ranges = [
-        f"C3:D{last_row}",  # Марж. прибыль
-        f"E3:H{last_row}",  # Заказы, Выкупы, Себест., Потери
-        f"I3:J{last_row}",
-        f"K3:K{last_row}",  # Возвраты по браку
-        f"P3:P{last_row}",  # Хранение руб
-        f"R3:R{last_row}",  # Баз. Ком. руб
-        f"T3:T{last_row}",  # СПП руб
-        f"V3:V{last_row}",  # Ком. ИТОГ руб
-        f"X3:Y{last_row}",  # Логистика
-        f"AA3:AA{last_row}",  # Логистика на ед
-        f"AB3:AB{last_row}",  # Реклама руб
-        f"AD3:AG{last_row}",  # Приемка, Штрафы, Корр.
+        f"C2:C{last_row}",  # Маржинальная прибыль (руб)
+        f"E2:G{last_row}",  # Заказы руб, Выкупы руб, Себестоимость продаж (руб)
+        f"I2:I{last_row}",  # Потери по браку (руб)
+        f"K2:K{last_row}",  # Возвраты по браку (руб)
+        f"P2:P{last_row}",  # Хранение (руб)
+        f"R2:R{last_row}",  # Базовая комиссия (руб)
+        f"T2:T{last_row}",  # СПП (руб)
+        f"V2:V{last_row}",  # Комиссия ИТОГ (руб)
+        f"X2:Y{last_row}",  # Логистика прямая, Логистика обратная
+        f"AA2:AA{last_row}",  # Логистика на ед
+        f"AB2:AB{last_row}",  # Реклама (руб)
+        f"AE2:AG{last_row}",  # Приемка, Штрафы, Корректировки
     ]
     for r in currency_ranges:
         worksheet.format(r, {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})
 
-    # Формат "Штуки" (NUMBER, 0)
-    worksheet.format(f"L3:N{last_row}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
+    # --- Формат "Штуки" (NUMBER, целое) ---
+    worksheet.format(f"L2:N{last_row}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
 
-    # Формат "Проценты" (PERCENT)
+    # --- Формат "Проценты" (PERCENT) ---
     percent_ranges = [
-        f"D3:D{last_row}",  # Марж. прибыль %
-        f"H3:H{last_row}",  # Себест. %
-        f"J3:J{last_row}",  # Потери %
-        f"O3:O{last_row}",  # % выкупа
-        f"Q3:Q{last_row}",  # Хранение %
-        f"S3:S{last_row}",  # Баз. Ком. %
-        f"U3:U{last_row}",  # СПП %
-        f"W3:W{last_row}",  # Ком. ИТОГ %
-        f"Z3:Z{last_row}",  # % логистики
-        f"AC3:AC{last_row}",  # Реклама %
-        f"AD3:AD{last_row}",  # % (ДРР)
+        f"D2:D{last_row}",  # Маржинальная прибыль (%)
+        f"H2:H{last_row}",  # Себестоимость (%)
+        f"J2:J{last_row}",  # Потери по браку (%)
+        f"O2:O{last_row}",  # % выкупа
+        f"Q2:Q{last_row}",  # Хранение (%)
+        f"S2:S{last_row}",  # Базовая комиссия (%)
+        f"U2:U{last_row}",  # СПП (%)
+        f"W2:W{last_row}",  # Комиссия ИТОГ (%)
+        f"Z2:Z{last_row}",  # % логистики
+        f"AC2:AC{last_row}",  # Реклама (%)
+        f"AD2:AD{last_row}",  # % (ДРР)
     ]
     for r in percent_ranges:
         worksheet.format(r, {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
@@ -197,7 +163,7 @@ def _apply_data_formatting(worksheet: gspread.Worksheet, last_row: int):
 async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_report_data: list, orders_data: list,
                                     ad_costs: dict, storage_costs: dict):
     """
-    Агрегирует данные по АРТИКУЛУ за весь период и заполняет лист "Юнит экономика".
+    Агрегирует данные и заполняет лист "Юнит экономика" (одноуровневая шапка).
     """
     SHEET_NAME = "Юнит экономика"
     try:
@@ -212,7 +178,8 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
             if not key: continue
             products[key]["orders_rub"] += order.get("totalPrice", 0) * (1 - order.get("discountPercent", 0) / 100)
             products[key]["orders_pcs"] += 1
-            if key not in product_names: product_names[key] = order.get("subject", "Не указано")
+            if key not in product_names:
+                product_names[key] = order.get("supplierArticle", "Не указано")
         for row in daily_report_data:
             key = row.get("nm_id")
             if not key: continue
@@ -282,9 +249,9 @@ async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_repo
 
         # 4. Запись данных в таблицу
         if rows_to_insert:
-            worksheet.update('A3', rows_to_insert, value_input_option='USER_ENTERED')
+            worksheet.update('A2', rows_to_insert, value_input_option='USER_ENTERED')
             # Корректируем диапазоны форматирования данных
-            _apply_data_formatting(worksheet, 2 + len(rows_to_insert))
+            _apply_data_formatting(worksheet, 1 + len(rows_to_insert))
 
             logger.info(f"Лист '{SHEET_NAME}' успешно заполнен. Добавлено строк: {len(rows_to_insert)}")
         else:
