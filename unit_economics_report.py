@@ -163,7 +163,33 @@ def _apply_data_formatting(worksheet: gspread.Worksheet, last_row: int):
 async def fill_unit_economics_sheet(spreadsheet: gspread.Spreadsheet, daily_report_data: list, orders_data: list,
                                     ad_costs: dict, storage_costs: dict):
     """
-    Агрегирует данные и заполняет лист "Юнит экономика" (одноуровневая шапка).
+    Агрегирует данные по артикулам за весь период и заполняет лист 'Юнит экономика'.
+
+        Артикул (nmId)          -      nmId
+        Наименование            -      supplierArticle из orders_data
+        Маржинальная прибыль    -
+        Заказы руб              -      totalPrice * (1 - discountPercent/100) из orders_data
+        Выкупы руб              -      retail_amount для операций "продажа"
+        Себестоимость продаж    -
+        Потери по браку         -
+        Возвраты по браку (руб) -
+        Заказы (шт)             -      количество записей в orders_data
+        Выкупы (шт)             -      quantity для операций "продажа" из reportDetailByPeriod
+        Возвраты по браку (шт)  -
+        % выкупа                -      Выкупы (шт) / Заказы (шт) * 100
+        Хранение                -      warehousePrice из отдельного API платного хранения
+        Базовая комиссия        -      Комиссия ИТОГ + СПП
+        СПП                     -      retail_amount * (ppvz_spp_prc / 100) из reportDetailByPeriod
+        Комиссия ИТОГ           -      Выкупы руб - ppvz_for_pay из reportDetailByPeriod
+        Логистика прямая        -      delivery_rub - rebill_logistic_cost из reportDetailByPeriod
+        Логистика обратная      -      rebill_logistic_cost из reportDetailByPeriod
+        % логистики             -
+        Логистика на ед         -
+        Реклама                 -      sum из отдельного Advert API
+        % (ДРР)                 -      Реклама / Выкупы руб * 100
+        Приемка                 -      acceptance из reportDetailByPeriod
+        Штрафы                  -      penalty из reportDetailByPeriod
+        Корректировки           -      additional_payment + cashback_amount + cashback_discount + cashback_commission_change из reportDetailByPeriod
     """
     SHEET_NAME = "Юнит экономика"
     try:
