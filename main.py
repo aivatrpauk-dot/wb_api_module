@@ -11,7 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-    FSInputFile
+    FSInputFile, KeyboardButton
 )
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -23,7 +23,8 @@ import database as db
 from analytic_report import (
     create_user_spreadsheet,
     schedule_sheet_deletion,
-    fill_pnl_report
+    fill_pnl_report,
+    generate_daily_unit_economics_report
 )
 from wb_api import get_supplier_name
 from token_daily_refresh import refresh_token
@@ -38,11 +39,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Настройки ---
-BOT_TOKEN = "7569142757:AAH_qYkixvV-4mSrcQfnagpIlJJc2YMLCW0"
-PHOTO_PATH = Path("start_image.jpeg")
+#BOT_TOKEN = "7569142757:AAH_qYkixvV-4mSrcQfnagpIlJJc2YMLCW0"
+#PHOTO_PATH = Path("start_image.jpeg")
 
 # --- Логирование ---
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # --- FSM States ---
@@ -357,41 +362,31 @@ async def generate_and_send_report(callback: CallbackQuery, state: FSMContext):
 
     user_id = callback.from_user.id
     user_data = await state.get_data()
-    start_date_str = user_data.get("start_date")
-    end_date_str = user_data.get("end_date")
-
-    # Очищаем данные в FSM
-    await state.update_data(start_date=None, end_date=None)
-
-    # Проверка наличия дат
-    if not start_date_str or not end_date_str:
-        await bot.send_message(user_id, "❌ Ошибка: не удалось определить даты отчёта.")
-        await send_main_menu(callback)
-        return
-
-    try:
-        start_date = datetime.fromisoformat(start_date_str)
-        end_date = datetime.fromisoformat(end_date_str)
-    except Exception as e:
-        logger.error(f"Ошибка парсинга дат: {e}")
-        await bot.send_message(user_id, "❌ Ошибка: некорректный формат дат.")
-        await send_main_menu(callback)
-        return
+    start_date = datetime.fromisoformat(user_data.get("start_date"))
+    end_date = datetime.fromisoformat(user_data.get("end_date"))
+    await state.clear()  # Очищаем состояние
 
     msg = await bot.send_message(
         user_id,
         f"📊 Генерирую отчет с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}..."
     )
 
-    report_result, report_url = await generate_financial_report(user_id, start_date, end_date)
+    # Вызываем ЕДИНСТВЕННУЮ управляющую функцию
+    _, _, sheet_id, _ = db.get_user_data(user_id)
+    report_url = await fill_pnl_report(sheet_id, user_id, start_date, end_date)
 
     if report_url:
+        spreadsheet_id_to_delete = report_url.split('/d/')[1].split('/')[0]
+        asyncio.create_task(schedule_sheet_deletion(spreadsheet_id_to_delete))
+
+        # Возвращаем исходный текст
+        report_text = "📊 Отчет успешно создан!\nОтчет будет доступен 12 часов."
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Открыть отчёт", url=report_url)]
         ])
-        await msg.edit_text(report_result, reply_markup=keyboard)
+        await msg.edit_text(report_text, reply_markup=keyboard)
     else:
-        await msg.edit_text(report_result)
+        await msg.edit_text("❌ Ошибка: не удалось сгенерировать отчет. Попробуйте позже или выберите другой период.")
 
     await send_main_menu(callback)
 

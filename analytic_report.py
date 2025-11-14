@@ -9,7 +9,9 @@ import logging
 from datetime import datetime, timedelta
 import asyncio
 import database as db
-from wb_api import get_wb_orders, get_wb_weekly_report
+from wb_api import get_wb_orders, get_wb_weekly_report, get_wb_paid_storage_report
+from unit_economics_report import create_unit_economics_sheet, fill_unit_economics_sheet
+from wb_advert import get_aggregated_ad_costs
 
 
 logger = logging.getLogger(__name__)
@@ -145,7 +147,9 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
         Продажи до СПП         -      retail_amount * quantity (для продаж)
         Себестоймость продаж   -      
         Потери от брака        -      
-        Комиссия               -      sales_before_spp - ppvz_for_pay
+        Базовая комиссия       -      Комиссия ИТОГО - ССП
+        СПП                    -      sales_before_spp*ppvz_spp_prc
+        Комиссия ИТОГО         -      sales_before_spp - ppvz_for_pay
         Возвраты               -      retail_amount * quantity (для возвратов)
         Реклама                -      deduction
         Прямая логистика       -      delivery_rub - rebill_logistic_cost
@@ -163,90 +167,36 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
     """
 
     try:
+        # 1. Создание листа
         try:
-            ws = spreadsheet.get_worksheet(0)
-            ws.update_title("P&L недельный")
-        except:
-            ws = spreadsheet.add_worksheet(
-                title="P&L недельный", rows=500, cols=30)
+            ws = spreadsheet.worksheet("P&L недельный")
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title="P&L недельный", rows=500, cols=30)
 
         headers = [
-            "Дата",
-            "Количество заказов",
-            "Заказы",
-            "Выкупили", 
-            "Продажи до СПП",
-            "Себестоймость продаж",
-            "Потери от брака",
-            "Комиссия",
-            "Возвраты",
-            "Реклама",
-            "Прямая логистика",
-            "Обратная логистика", 
-            "Хранение",
-            "Приемка",
-            "Корректировки",
-            "Штрафы",
-            "Итого к оплате",
-            "Опер затраты",
-            "Ebitda/%",
-            "",
-            "Налоги", 
-            "Кредит",
-            "Чистая прибыль/ROI",
-            ""
+            "Дата", "Количество заказов", "Заказы", "Выкупили", "Продажи до СПП",
+            "Себестоймость продаж", "Потери от брака", "Базовая комиссия", "СПП", "Комиссия ИТОГ", "Возвраты", "Реклама",
+            "Прямая логистика", "Обратная логистика", "Хранение", "Приемка",
+            "Корректировки", "Штрафы", "Итого к оплате", "Опер затраты",
+            "Ebitda/%", "", "Налоги", "Кредит", "Чистая прибыль/ROI", ""
         ]
 
-        # Агрегация по дням
-        daily_aggr = defaultdict(lambda: {
-            "orders_count": 0,
-            "orders": 0,
-            "sales_quantity": 0,
-            "sales_before_spp": 0,
-            "cost": 0,
-            "commission": 0,
-            "returns": 0,
-            "advertising": 0,
-            "forward_logistics": 0,
-            "reverse_logistics": 0,
-            "storage": 0,
-            "acceptance": 0,
-            "adjustments": 0,
-            "penalties": 0,
-            "oper_expenses": 0,
-            "to_pay": 0,
-            "total_to_pay": 0
-        })
+        # 2. Агрегация по дням
+        daily_aggr = defaultdict(lambda: defaultdict(float))
 
+        # Цикл по заказам
         for row in daily_data:
             date_str = row.get("date", "")[:10]
-            if not date_str:
-                continue
+            if not date_str: continue
             daily_aggr[date_str]["orders_count"] += 1
             daily_aggr[date_str]["orders"] += row.get("totalPrice", 0) * (1 - row.get("discountPercent", 0) / 100)
 
+        # Цикл по финансовому отчету
         for row in weekly_data:
             date_str = row.get("rr_dt", "")[:10]
-            if not date_str:
-                continue
-
-            doc_type = (row.get("doc_type_name") or "").lower()
-            price_with_disc = row.get("retail_price_withdisc_rub", 0)
-            quantity = row.get("quantity", 0)
-
-            is_sale = "продажа" in doc_type
-            is_return = "возврат" in doc_type
-
-            if is_sale:
-                daily_aggr[date_str]["sales_quantity"] += quantity
-                daily_aggr[date_str]["sales_before_spp"] += row.get("retail_amount", 0) * quantity
-                if quantity not in (0, 1):
-                    logger.warning(f"Количество: {quantity}, retail_amount: {row.get('retail_amount', 0)}, price_with_disc: {price_with_disc}, doc_type: {doc_type}")
-            
-            returns = 0
-            if is_return:
-                returns = row.get("retail_amount", 0) * quantity
-                daily_aggr[date_str]["returns"] += returns
+            if not date_str: continue
+            # Суммируем `retail_amount` по всем операциям для корректного расчета комиссии
+            daily_aggr[date_str]["total_retail_turnover"] += row.get("retail_amount", 0)
 
             daily_aggr[date_str]["advertising"] += row.get("deduction", 0)
             daily_aggr[date_str]["forward_logistics"] += row.get("delivery_rub", 0) - row.get("rebill_logistic_cost", 0)
@@ -254,69 +204,87 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
             daily_aggr[date_str]["storage"] += row.get("storage_fee", 0)
             daily_aggr[date_str]["acceptance"] += row.get("acceptance", 0)
             daily_aggr[date_str]["penalties"] += row.get("penalty", 0)
+            adjustments = (
+                    row.get("additional_payment", 0) +
+                    row.get("cashback_amount", 0) +
+                    row.get("cashback_discount", 0) +
+                    row.get("cashback_commission_change", 0)
+            )
+            daily_aggr[date_str]["adjustments"] += adjustments
             daily_aggr[date_str]["to_pay"] += row.get("ppvz_for_pay", 0)
 
-            additional_payment = row.get("additional_payment", 0)
-            installment_cofinancing = row.get("installment_cofinancing_amount", 0)
-            cashback_discount = row.get("cashback_discount", 0)
-            cashback_amount = row.get("cashback_amount", 0)
-            cashback_commission_change = row.get("cashback_commission_change", 0)
-            
-            adjustments = additional_payment + cashback_discount + cashback_amount + cashback_commission_change
-            daily_aggr[date_str]["adjustments"] += adjustments
+            doc_type = (row.get("doc_type_name") or "").lower()
+            quantity = row.get("quantity", 0)
+            spp_amount = row.get("retail_amount", 0) * (row.get("ppvz_spp_prc", 0) / 100)
+            daily_aggr[date_str]["spp"] += spp_amount
+            if "продажа" in doc_type:
+                daily_aggr[date_str]["sales_quantity"] += quantity
+                daily_aggr[date_str]["sales_before_spp"] += row.get("retail_amount", 0)
+            elif "возврат" in doc_type:
+                daily_aggr[date_str]["returns"] += row.get("retail_amount", 0)
 
-            daily_aggr[date_str]["total_to_pay"] += row.get("ppvz_for_pay", 0) - adjustments - row.get("penalty", 0) - row.get("delivery_rub", 0) \
-                                                 - row.get("storage_fee", 0) - row.get("acceptance", 0) - row.get("deduction", 0) - returns
-
-        # Формируем строки
+        # 3. Формирование строк
         rows = [headers]
-        total_row = [0] * len(headers)
+        total_row = [0.0] * len(headers)
         total_row[0] = "Факт"
 
         current = start_date
         while current <= end_date:
             date_str = current.strftime("%Y-%m-%d")
-            day_data = daily_aggr.get(date_str, {})
+            day_data = daily_aggr[date_str]
+            commission_total = day_data["sales_before_spp"] - day_data["to_pay"]
+            spp = day_data["spp"]
+            commission_base = commission_total + spp
+            # Расчет "Итого к оплате"
+            total_to_pay_day = (day_data["to_pay"] - day_data["adjustments"] - day_data["penalties"] -
+                                (day_data["forward_logistics"] + day_data["reverse_logistics"]) -
+                                day_data["storage"] - day_data["acceptance"] - day_data["advertising"] -
+                                day_data["returns"])
 
             row = [
                 current.strftime("%d.%m.%Y"),
-                day_data.get("orders_count", 0),
-                day_data.get("orders", 0),
-                day_data.get("sales_quantity", 0),
-                day_data.get("sales_before_spp", 0),
-                0,  # Себестоймость продаж
-                0,  # Потери от брака
-                day_data.get("sales_before_spp", 0) - day_data.get("to_pay", 0),
-                day_data.get("returns", 0),
-                day_data.get("advertising", 0),
-                day_data.get("forward_logistics", 0), 
-                day_data.get("reverse_logistics", 0),
-                day_data.get("storage", 0),
-                day_data.get("acceptance", 0),
-                day_data.get("adjustments", 0),
-                day_data.get("penalties", 0),
-                day_data.get("total_to_pay", 0),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0
+                int(day_data["orders_count"]),
+                day_data["orders"],
+                int(day_data["sales_quantity"]),
+                day_data["sales_before_spp"],
+                0, 0,
+                commission_base, spp, commission_total,
+                day_data["returns"],
+                day_data["advertising"],
+                day_data["forward_logistics"],
+                day_data["reverse_logistics"],
+                day_data["storage"],  # <-- Теперь берется из daily_aggr
+                day_data["acceptance"],
+                day_data["adjustments"],
+                day_data["penalties"],
+                total_to_pay_day,
+                0, 0, 0, 0, 0, 0, 0
             ]
             rows.append(row)
 
             for i in range(1, len(headers)):
-                total_row[i] += row[i]
+                if isinstance(row[i], (int, float)):
+                    total_row[i] += row[i]
 
             current += timedelta(days=1)
 
-        # Вставляем ИТОГО и пустую строку
+        # 4. Вставка итогов и обновление
         rows.insert(1, total_row)
-        rows.insert(2, ["%"] + [""] * (len(headers)-1))  # Пустая строка после ИТОГО
 
-        # Обновляем данные
-        ws.update("A1", rows)
+        percentage_row = ["%"]
+        sales_before_spp_total = total_row[headers.index("Продажи до СПП")]
+
+        for i in range(1, len(headers)):
+            header = headers[i]
+            if header == "Продажи до СПП" or header == "" or sales_before_spp_total == 0:
+                percentage_row.append("")
+            else:
+                percentage = total_row[i] / sales_before_spp_total
+                percentage_row.append(percentage)
+
+        rows.insert(2, percentage_row)
+
+        ws.update("A1", rows, value_input_option='USER_ENTERED')
 
         # ========================================
         # ФОРМАТИРОВАНИЕ ЧЕРЕЗ batch_format
@@ -353,41 +321,44 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
             }
         })
 
-        # 13. Строка 3 (процентная): вычисленные значения % (ячейки B3:X3)
-        if len(rows) > 2:
-            sales_before_spp_total = total_row[4]  # Продажи до СПП из строки "Факт"
-            if sales_before_spp_total != 0:
-                # Создаем список вычисленных значений для столбцов B-X (пропуская E)
-                percentage_values = []
-                for i in range(1, len(total_row)):  # от B до X
-                    if i == 4:  # Пропускаем столбец E (Продажи до СПП)
-                        percentage_values.append("")
-                    else:
-                        # Вычисляем процент: значение из строки "Факт" / Продажи до СПП
-                        fact_value = total_row[i]
-                        if sales_before_spp_total != 0:
-                            percentage = fact_value / sales_before_spp_total
-                            percentage_values.append(percentage)
-                        else:
-                            percentage_values.append(0)
-                
-                # Обновляем ячейки вычисленными значениями
-                ws.update("B3:X3", [percentage_values])
-                
-                # Применяем процентный формат
-                format_requests.append({
-                    "range": "B3:X3",
-                    "format": {
-                        "numberFormat": {
-                            "type": "PERCENT", 
-                            "pattern": "0.00%"
-                        }
-                    }
-                })
-
-        # 14. Строка 2 (Факт): формат "Валюта" для числовых столбцов (B2:X2)
         format_requests.append({
-            "range": "B2:X2",
+            "range": "B3:X3",
+            "format": {
+                "numberFormat": {
+                    "type": "PERCENT",
+                    "pattern": "0.00%"
+                }
+            }
+        })
+
+        # 14. Форматирование строки 2 (Факт)
+        # Применяем формат "Число" к "Количество заказов" (B2) и "Выкупили" (D2)
+        format_requests.append({
+            "range": "B2",
+            "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}
+        })
+        format_requests.append({
+            "range": "D2",
+            "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}
+        })
+
+        # Применяем формат "Валюта" к остальным нужным диапазонам
+        # C2 (Заказы) и E2:X2 (Продажи до СПП и далее)
+        format_requests.append({
+            "range": "C2",
+            "format": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}}
+        })
+        format_requests.append({
+            "range": "E2:X2",
+            "format": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}}
+        })
+        # 14.1. Формат "Валюта" для данных по дням (строки с 4-й и ниже)
+        # Нам нужно отформатировать все числовые столбцы
+        # Индекс "Комиссии" = 7. A=0, B=1... H=7
+        commission_col_letter = "H"
+        format_requests.append({
+            # Применяем формат ко всему столбцу, начиная с 4-й строки
+            "range": f"{commission_col_letter}4:X",
             "format": {
                 "numberFormat": {
                     "type": "CURRENCY",
@@ -395,7 +366,6 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
                 }
             }
         })
-
         # 15. Строка 3: нижняя граница темно-серый
         format_requests.append({
             "range": "A3:X3",
@@ -442,7 +412,7 @@ async def fill_pnl_weekly_sheet(spreadsheet, weekly_data: list, daily_data, star
         ws.merge_cells("W3:X3")
 
     except Exception as e:
-        logger.error(f"Ошибка при заполнении 'P&L недельный': {e}")
+        logger.error(f"Ошибка при заполнении 'P&L недельный': {e}", exc_info=True)
         raise
 
 
@@ -461,7 +431,9 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         Выкупы, шт             -      quantity (для продаж)
         Возвраты по браку, шт  -      
         % выкупа               -      
-        Комиссия               -      sales_before_spp - ppvz_for_pay
+        Базовая комиссия       -      Комиссия ИТОГО - ССП
+        СПП                    -      sales_before_spp*ppvz_spp_prc
+        Комиссия ИТОГО         -      sales_before_spp - ppvz_for_pay
         Логистика прямая       -      delivery_rub - rebill_logistic_cost
         Логистика обратная     -      rebill_logistic_cost
         Хранение               -      storage_fee
@@ -487,7 +459,9 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
             "Выкупы, шт",
             "Возвраты по браку, шт",
             "% выкупа",
-            "Комиссия",
+            "Базовая комиссия",
+            "СПП",
+            "Комиссия ИТОГ",
             "Логистика прямая",
             "Логистика обратная",
             "Хранение",
@@ -514,7 +488,9 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
             "penalties": 0,
             "oper_expenses": 0,
             "to_pay": 0,
-            "total_to_pay": 0
+            "total_to_pay": 0,
+            "total_retail_turnover": 0,
+            "spp": 0
         })
 
         for row in daily_data:
@@ -524,12 +500,11 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
 
             products[nm_id]["orders_count"] += 1
             products[nm_id]["orders"] += row.get("totalPrice", 0) * (1 - row.get("discountPercent", 0) / 100)
-            
 
         for row in weekly_data:
             nm_id = row.get("nm_id")
             if not nm_id:
-                logger.warning(f"Пропущена строка без nm_id: {row}")
+                #logger.warning(f"Пропущена строка без nm_id: {row}")
                 continue
 
             doc_type = (row.get("doc_type_name") or "").lower()
@@ -538,7 +513,8 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
 
             is_sale = "продажа" in doc_type
             is_return = "возврат" in doc_type
-
+            spp_amount = row.get("retail_amount", 0) * quantity * (row.get("ppvz_spp_prc", 0) / 100)
+            products[nm_id]["spp"] += spp_amount
             if is_sale:
                 products[nm_id]["sales_quantity"] += quantity
                 products[nm_id]["sales_before_spp"] += row.get("retail_amount", 0) * quantity
@@ -546,8 +522,6 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
             if is_return:
                 returns = row.get("retail_amount", 0) * quantity
                 products[nm_id]["returns"] += returns
-
-            products[nm_id]["commission"] += row.get("ppvz_vw", 0)
             
             products[nm_id]["advertising"] += row.get("deduction", 0)
             products[nm_id]["forward_logistics"] += row.get("delivery_rub", 0) - row.get("rebill_logistic_cost", 0)
@@ -560,7 +534,7 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
             
             products[nm_id]["penalties"] += row.get("penalty", 0)
             products[nm_id]["to_pay"] += row.get("ppvz_for_pay", 0)
-
+            products[nm_id]["total_retail_turnover"] += row.get("retail_amount", 0) * quantity
             additional_payment = row.get("additional_payment", 0)
             installment_cofinancing = row.get("installment_cofinancing_amount", 0)
             cashback_discount = row.get("cashback_discount", 0)
@@ -575,6 +549,10 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         data = [headers]
         for nm_id in sorted(products.keys()):
             p = products[nm_id]
+            commission_total = p["sales_before_spp"] - p["to_pay"]
+            spp = p["spp"]
+            commission_base = commission_total + spp
+
             row = [
                 nm_id,
                 p["orders"],
@@ -584,7 +562,7 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
                 p["sales_quantity"],
                 0,
                 0, # % выкупа
-                p["sales_before_spp"] - p["to_pay"], # комиссия
+                commission_base, spp, commission_total,
                 p["forward_logistics"],
                 p["reverse_logistics"],
                 p["storage"],
@@ -631,6 +609,21 @@ async def fill_product_analytics_weekly_sheet(spreadsheet, weekly_data: list, da
         if format_requests:
             ws.batch_format(format_requests)
 
+        # --- БЛОК ДЛЯ ФОРМАТИРОВАНИЯ ДАННЫХ ---
+        num_rows = len(data)
+        if num_rows > 1:
+            # Формат валюты
+            ws.format(f"B2:D{num_rows}", {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})
+            ws.format(f"I2:K{num_rows}",
+                      {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})  # Баз.Ком, СПП, Ком.Итог
+            ws.format(f"L2:P{num_rows}",
+                      {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00\" ₽\""}})  # Логистика и далее
+
+            # Формат целых чисел
+            ws.format(f"E2:G{num_rows}", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
+
+            # Формат процентов
+            ws.format(f"H2:H{num_rows}", {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}})
     except Exception as e:
         logger.error(
             f"Ошибка при заполнении 'Товарная аналитика (недельная)': {e}")
@@ -750,63 +743,107 @@ async def fill_product_analytics_daily_sheet(spreadsheet, products, acceptance_b
 # ========================================
 
 async def fill_pnl_report(
-    spreadsheet_id: str,
-    shop_id: int,
-    start_date: datetime,
-    end_date: datetime,
-    full_data=None
-) -> bool:
+        spreadsheet_id: str,
+        shop_id: int,
+        start_date: datetime,
+        end_date: datetime,
+        full_data=None
+) -> str:
     """
-    Заполняет отчет P&L в Google Sheets.
+    Создает ОДНУ Google Таблицу и заполняет ее всеми отчетами из единого набора данных,
+    полученного за указанный пользователем период.
     """
+    # Инициализируем переменные для доступа в блоке except
+    spreadsheet = None
+    gc = None
     try:
-        # === 1. Определяем границы текущей недели ===
-        today = datetime.utcnow().date()
-        current_week_start, _ = get_current_week_range(datetime.combine(today, datetime.min.time()))
-
-        # === 2. Разделяем периоды ===
-        has_weekly = False
-        weekly_start = weekly_end = None
-
-        # Прошлые недели: всё, что строго до понедельника текущей недели
-        if end_date < current_week_start:
-            has_weekly = True
-            weekly_start, weekly_end = start_date, end_date
-        elif start_date < current_week_start:
-            has_weekly = True
-            weekly_start, weekly_end = start_date, current_week_start - timedelta(seconds=1)
-
-        # === 3. Создаём таблицу ===
+        # === 1. Получение API ключа и создание Google Таблицы ===
         gc = await get_gspread_client()
-        if not gc:
-            return False
+        if not gc: return None
 
-        spreadsheet_title = f"Отчет: {shop_id} ({start_date.strftime('%d.%m.%Y')}-{end_date.strftime('%d.%m.%Y')})"
-        logger.info(f"Создание таблицы: {spreadsheet_title}")
+        api_key, _, _, shop_name = db.get_user_data(shop_id)
+        if not api_key:
+            logger.error(f"API ключ не найден для shop_id {shop_id}")
+            return None
+
+        shop_display_name = shop_name or f"Магазин {shop_id}"
+        spreadsheet_title = f"Фин. отчет: {shop_display_name} ({start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m.%Y')})"
         spreadsheet = gc.create(spreadsheet_title)
         spreadsheet.share(None, perm_type='anyone', role='reader')
 
-        api_key, _, _, _ = db.get_user_data(shop_id)
-        if not api_key:
-            logger.error("API ключ не найден")
-            return False
+        logger.info(f"Создана таблица: {spreadsheet.url}")
+        default_sheet = spreadsheet.get_worksheet(0)
 
-        # === 4. Обработка WEEKLY-части ===
-        if has_weekly:
-            logger.info(f"Weekly период: {weekly_start} — {weekly_end}")
-            date_from_w = weekly_start.strftime("%Y-%m-%d")
-            date_to_w = weekly_end.strftime("%Y-%m-%d")
+        # === 2. ОПТИМИЗИРОВАННЫЙ И ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПРОС ДАННЫХ ===
+        logger.info("Запрашиваю данные от WB API (фаза 1: заказы и хранение)...")
 
-            weekly_raw_data = await get_wb_weekly_report(api_key, date_from_w, date_to_w)
-            daily_orders_data = await get_wb_orders(api_key, date_from_w, date_to_w)
-            await fill_pnl_weekly_sheet(spreadsheet, weekly_raw_data, daily_orders_data, weekly_start, weekly_end)
-            await fill_product_analytics_weekly_sheet(spreadsheet, weekly_raw_data, daily_orders_data)
+        # 1. Формируем и параллельно запускаем "медленные" задачи к РАЗНЫМ доменам
+        orders_task = get_wb_orders(api_key, start_date, end_date)
+        storage_report_task = get_wb_paid_storage_report(api_key, start_date, end_date)
+
+        orders_data, storage_data = await asyncio.gather(
+            orders_task, storage_report_task
+        )
+
+        # 2. Формируем и параллельно запускаем вторую фазу запросов
+        logger.info("Запрашиваю данные от WB API (фаза 2: детализация и реклама)...")
+
+        # Сначала готовим target_nm_ids, так как он нужен для одной из задач
+        target_nm_ids = {order['nmId'] for order in (orders_data or []) if 'nmId' in order}
+        logger.info(f"Найдено {len(target_nm_ids)} уникальных nmId для запроса расходов на рекламу.")
+
+        # Создаем задачи
+        report_data_task = get_wb_weekly_report(api_key, start_date, end_date, period="daily")
+        ad_costs_task = get_aggregated_ad_costs(api_key, start_date, end_date, target_nm_ids)
+
+        # 3. Выполняем их одновременно
+        report_data, ad_costs = await asyncio.gather(
+            report_data_task, ad_costs_task
+        )
+
+        # 4. Агрегируем данные по хранению (теперь это просто обработка уже полученных данных)
+        storage_costs = defaultdict(float)
+        if storage_data:
+            for row in storage_data:
+                key = (row.get("date"), row.get("nmId"))
+                if all(key):
+                    storage_costs[key] += row.get("warehousePrice", 0)
+        # Дополнительно агрегируем хранение по дням для P&L отчета
+        storage_costs_by_day = defaultdict(float)
+        if storage_data:
+            for row in storage_data:
+                date_str = row.get("date")
+                if date_str:
+                    storage_costs_by_day[date_str] += row.get("warehousePrice", 0)
+
+        # 5. Проверяем на критическую ошибку API
+        if report_data is None or orders_data is None:
+            logger.error("Критическая ошибка API: не удалось получить основные данные (детализация или заказы).")
+            raise Exception("API data fetch failed")
+
+        # === 3. Заполнение всех листов из единого набора данных ===
+        logger.info("Заполняю листы отчетов...")
+
+        # Все функции вызываются с едиными данными и датами, которые выбрал пользователь
+        await fill_pnl_weekly_sheet(spreadsheet, report_data, orders_data, start_date, end_date)
+        await fill_product_analytics_weekly_sheet(spreadsheet, report_data, orders_data)
+        await create_unit_economics_sheet(spreadsheet)
+        await fill_unit_economics_sheet(spreadsheet, report_data, orders_data, ad_costs, storage_costs)
+
+        # Удаляем стандартный лист, созданный по умолчанию
+        spreadsheet.del_worksheet(default_sheet)
+
         return spreadsheet.url
 
     except Exception as e:
-        logger.error(f"Ошибка в fill_pnl_report: {e}", exc_info=True)
-        return False
-
+        logger.error(f"Критическая ошибка в fill_pnl_report: {e}", exc_info=True)
+        # Если что-то пошло не так, и таблица была создана, пытаемся ее удалить
+        if spreadsheet and gc:
+            try:
+                gc.del_spreadsheet(spreadsheet.id)
+            except Exception as del_e:
+                logger.error(f"Не удалось удалить частично созданную таблицу: {del_e}")
+        return None
 ############################################################################################################################
 
 
@@ -823,3 +860,64 @@ async def schedule_sheet_deletion(sheet_id: str, delay_hours: int = 12):
             logger.info(f"Таблица {sheet_id} удалена")
     except Exception as e:
         logger.error(f"Ошибка удаления таблицы: {e}")
+
+
+###########################################################################################################################
+# НОВЫЙ БЛОК ДЛЯ ОТЧЕТА "ЮНИТ ЭКОНОМИКА"
+# ###########################################################################################################################
+
+async def generate_daily_unit_economics_report(user_id: int, start_date: datetime, end_date: datetime):
+    """
+    Полный цикл генерации отчета "Юнит экономика" по дням и артикулам.
+    """
+    # Импортируем bot здесь, чтобы избежать циклических зависимостей
+    from main import bot
+
+    # 1. Проверка периода (не более 31 дня)
+    if (end_date - start_date).days > 30:
+        logger.warning(f"Пользователь {user_id} запросил слишком большой период. Отклонено.")
+        return "❌ Ошибка: Период отчета не должен превышать 31 день.", None
+
+    # 2. Получение данных
+    api_key, _, _, shop_name = db.get_user_data(user_id)
+    if not api_key:
+        return "❌ Ошибка: API-ключ не найден. Пожалуйста, добавьте магазин в настройках.", None
+
+    date_from_str = start_date.strftime("%Y-%m-%d")
+    date_to_str = end_date.strftime("%Y-%m-%d")
+
+    msg_status = await bot.send_message(user_id, "⏳ Запрашиваю данные из Wildberries API...")
+
+    # Вызываем обновленную функцию с period="daily"
+    report_task = get_wb_weekly_report(api_key, date_from_str, date_to_str, period="daily")
+    orders_task = get_wb_orders(api_key, date_from_str, date_to_str)
+    daily_report_data, orders_data = await asyncio.gather(report_task, orders_task)
+
+    if daily_report_data is None or orders_data is None:
+        return "❌ Ошибка: Не удалось получить данные от Wildberries. Попробуйте позже.", None
+
+    await msg_status.edit_text("⚙️ Создаю и форматирую Google Таблицу...")
+
+    # 3. Создание и форматирование таблицы
+    gc = await get_gspread_client()
+    if not gc:
+        return "❌ Ошибка: Не удалось подключиться к Google API.", None
+
+    shop_display_name = shop_name or f"Магазин {user_id}"
+    spreadsheet_title = f"Юнит-экономика: {shop_display_name} ({start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m.%Y')})"
+    spreadsheet = gc.create(spreadsheet_title)
+    spreadsheet.share(None, perm_type='anyone', role='reader')
+
+    default_sheet = spreadsheet.get_worksheet(0)
+
+    await create_unit_economics_sheet(spreadsheet)
+
+    await msg_status.edit_text("📝 Заполняю отчет данными...")
+
+    # 4. Наполнение данными
+    await fill_unit_economics_sheet(spreadsheet, daily_report_data, orders_data)
+
+
+    spreadsheet.del_worksheet(default_sheet)
+
+    return "✅ Отчет успешно создан!", spreadsheet.url
